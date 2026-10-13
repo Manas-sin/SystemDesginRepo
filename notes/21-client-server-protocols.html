@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Client-Server Model &amp; Communication Protocols — notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Patrick+Hand&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../css/notes.css">
+<style>
+  /* page-specific: a note inside a blue section that is not from the video */
+  .callout.added{--c:var(--amber)}
+  .prose pre{max-width:100%}
+</style>
+</head>
+<body>
+
+<!-- arrowheads shared by every diagram on the page -->
+<svg class="dia" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head teal" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head red" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head accent" d="M0 0L10 5L0 10z"/></marker>
+  </defs>
+</svg>
+
+<div class="wrap">
+
+  <header class="hero">
+    <div class="topbar">
+      <p class="eyebrow">Lesson 21 · Networking · Notes</p>
+      <div class="topbar-right">
+        <a class="back" href="../index.html">← Learning plan</a>
+        <button class="toggle" id="themeBtn" type="button">◐ Theme</button>
+      </div>
+    </div>
+    <h1>Client-Server Model &amp; Communication Protocols</h1>
+    <p class="lede">How two machines talk: who asks, who answers, what carries the bytes, and what the bytes mean. These notes cover TCP, HTTP and WebSocket as the lesson explains them, then go deeper on the parts an interviewer will push on.</p>
+    <div class="chips">
+      <span class="chip"><b>21 min 15 s</b> video</span>
+      <span class="chip"><b>Blue</b> sections · from the video</span>
+      <span class="chip"><b style="color:var(--amber)">Amber</b> sections · extra depth</span>
+    </div>
+  </header>
+
+  <div class="tldr">
+    <h2>The whole lesson in six lines</h2>
+    <ol>
+      <li>One machine (the <strong>client</strong>) asks for something. Another (the <strong>server</strong>) does the work and answers. They talk over the network.</li>
+      <li>Almost all of that talk rides on <strong>TCP</strong>, which delivers bytes reliably. Opening a TCP connection costs three messages; closing it costs two.</li>
+      <li>A TCP connection does not close by itself after data is sent. It stays open until the client or the server closes it, or the network breaks.</li>
+      <li>TCP does not care what the bytes mean. The format both sides agree on is the <strong>protocol</strong>. HTTP is the common one, but you can invent your own.</li>
+      <li><strong>HTTP/1.1</strong>, as usually used: one request, one response, close. You pay the open-and-close cost again and again, unless the <code>Connection: keep-alive</code> header keeps the connection open.</li>
+      <li><strong>WebSocket:</strong> open once, stay open, and either side sends whenever it wants. Use it only when the server must push data in real time — chat, live likes, stock prices.</li>
+    </ol>
+  </div>
+
+  <ul class="toc" aria-label="Contents">
+    <li><a href="#sketch"><b>✎</b>The picture to draw</a></li>
+    <li><a href="#model"><b>1</b>The client-server model</a></li>
+    <li><a href="#tcp"><b>2</b>TCP: the reliable pipe</a></li>
+    <li><a href="#protocol"><b>3</b>A protocol is an agreed format</a></li>
+    <li><a href="#http"><b>4</b>HTTP/1.1 and keep-alive</a></li>
+    <li><a href="#websocket"><b>5</b>WebSocket</a></li>
+    <li><a href="#pick"><b>6</b>Which one when</a></li>
+    <li><a href="#deeper"><b>7</b>Going deeper</a></li>
+    <li><a href="#lab"><b>8</b>Hands-on lab</a></li>
+    <li><a href="#interview"><b>9</b>In the interview</a></li>
+  </ul>
+
+  <section id="sketch" class="sketch-sec">
+    <div class="sec-head">
+      <span class="sec-num">✎</span>
+      <div>
+        <h2>The picture to draw</h2>
+        <div class="sec-meta"><span class="badge">Sketch · editable in Excalidraw</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>Part A is one connection from the first TCP message to the close: the handshake, two HTTP requests reusing the same connection, and the upgrade to WebSocket. Part B is the box diagram for a product that needs live updates. Draw A when asked “what happens when the client sends a request?” and B when asked for chat, notifications or live scores.</p>
+    </div>
+    <div class="paper"><button class="zoom-btn" type="button" data-zoom>⤢ Full size</button><div class="paper-scroll"><svg class="sketch" data-sketch="sk" role="img" aria-label="Part A: a sequence between client and server showing the TCP handshake, two HTTP requests on one kept-alive connection, the WebSocket upgrade and two-way messages. Part B: clients, load balancer, stateless API servers, stateful WebSocket gateways, a database and a pub/sub service. Notes explain each part."></svg></div></div>
+    <p class="paper-foot"><span class="cap">Sketch · lesson 21</span><span><a class="btn ghost" href="../diagrams/21-client-server-protocols.excalidraw" download>Download for Excalidraw</a> &nbsp; open it at excalidraw.com → menu → Open</span></p>
+    <script type="application/json" id="sk" data-sketch-src="diagrams/21-client-server-protocols.excalidraw">{"elements":[{"id":"e270a6ab9","type":"text","x":0,"y":0,"width":877.8000000000001,"height":35.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1140498159,"version":1,"versionNonce":1631010082,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Lesson 21 · Client-server model & communication protocols","originalText":"Lesson 21 · Client-server model & communication protocols","fontSize":28,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e1a59ffb1","type":"text","x":0,"y":42,"width":774.4000000000001,"height":20.0,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":622686157,"version":1,"versionNonce":957105280,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"A · one connection, step by step (read top to bottom).   B · the boxes for live updates.","originalText":"A · one connection, step by step (read top to bottom).   B · the boxes for live updates.","fontSize":16,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4002e73b","type":"text","x":20,"y":78,"width":264.0,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1443446602,"version":1,"versionNonce":382037089,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"A · One connection, step by step","originalText":"A · One connection, step by step","fontSize":15,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e22a07a14","type":"text","x":760,"y":78,"width":222.75000000000003,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":745179022,"version":1,"versionNonce":1725887396,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"B · Live updates: the boxes","originalText":"B · Live updates: the boxes","fontSize":15,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2532b29","type":"rectangle","x":20,"y":100,"width":160,"height":44,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["c"],"frameId":null,"roundness":{"type":3},"seed":2135670316,"version":1,"versionNonce":537834622,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e4bac1a1","type":"text","x":9.249999999999986,"y":112.625,"width":181.50000000000003,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["c"],"frameId":null,"roundness":null,"seed":32955537,"version":1,"versionNonce":39586495,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Client (browser / app)","originalText":"Client (browser / app)","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e5dd593fc","type":"rectangle","x":380,"y":100,"width":160,"height":44,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["sv"],"frameId":null,"roundness":{"type":3},"seed":1085883652,"version":1,"versionNonce":1183368988,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e7d30cbbb","type":"text","x":435.25,"y":112.625,"width":49.50000000000001,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["sv"],"frameId":null,"roundness":null,"seed":406854725,"version":1,"versionNonce":1104311061,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Server","originalText":"Server","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e3cc4f4e9","type":"line","x":100,"y":144,"width":0,"height":426,"angle":0,"strokeColor":"#adb5bd","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":527592750,"version":1,"versionNonce":2007130219,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[0,426]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":null,"elbowed":false},{"id":"e39391dcf","type":"line","x":460,"y":144,"width":0,"height":426,"angle":0,"strokeColor":"#adb5bd","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":228237454,"version":1,"versionNonce":1413732114,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[0,426]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":null,"elbowed":false},{"id":"e68d26010","type":"arrow","x":100,"y":180,"width":360,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1396091995,"version":1,"versionNonce":928094289,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[360,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e54088051","type":"text","x":269.275,"y":162,"width":21.450000000000003,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1063007788,"version":1,"versionNonce":1172324745,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"SYN","originalText":"SYN","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6ad4a116","type":"arrow","x":460,"y":208,"width":360,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1908524496,"version":1,"versionNonce":844145915,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[-360,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e7c333258","type":"text","x":254.975,"y":190,"width":50.050000000000004,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1088099803,"version":1,"versionNonce":660959058,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"SYN-ACK","originalText":"SYN-ACK","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e5807ebde","type":"arrow","x":100,"y":236,"width":360,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":462097932,"version":1,"versionNonce":2109774993,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[360,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e1d626d4e","type":"text","x":269.275,"y":218,"width":21.450000000000003,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":735952588,"version":1,"versionNonce":426542823,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"ACK","originalText":"ACK","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6a885d83","type":"arrow","x":100,"y":285,"width":360,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1893926226,"version":1,"versionNonce":1517681244,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[360,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e5d4ac409","type":"text","x":208.5,"y":267,"width":143.0,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1365750110,"version":1,"versionNonce":300043864,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"GET /orders   (HTTP)","originalText":"GET /orders   (HTTP)","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e33cd226f","type":"arrow","x":460,"y":313,"width":360,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":2124802073,"version":1,"versionNonce":746362614,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[-360,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e7dae4eac","type":"text","x":233.525,"y":295,"width":92.95,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":116798482,"version":1,"versionNonce":1797418776,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"200 OK + JSON","originalText":"200 OK + JSON","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e109de540","type":"arrow","x":100,"y":355,"width":360,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":30612660,"version":1,"versionNonce":151876084,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[360,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e500eb0b8","type":"text","x":233.525,"y":337,"width":92.95,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1591047425,"version":1,"versionNonce":1889472672,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"GET /orders/7","originalText":"GET /orders/7","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e20b74cd9","type":"arrow","x":460,"y":383,"width":360,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":925008635,"version":1,"versionNonce":350569239,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[-360,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e7176206","type":"text","x":258.55,"y":365,"width":42.900000000000006,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":181429876,"version":1,"versionNonce":1428565553,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"200 OK","originalText":"200 OK","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6baeb3b5","type":"arrow","x":100,"y":430,"width":360,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":817937408,"version":1,"versionNonce":1869465733,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[360,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e40c2bcbf","type":"text","x":172.75,"y":412,"width":214.50000000000003,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1439980762,"version":1,"versionNonce":2085056265,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"GET /chat   Upgrade: websocket","originalText":"GET /chat   Upgrade: websocket","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e241663c8","type":"arrow","x":460,"y":458,"width":360,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1285866851,"version":1,"versionNonce":520148308,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[-360,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e58a9eb4f","type":"text","x":197.77499999999998,"y":440,"width":164.45000000000002,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":629338328,"version":1,"versionNonce":97146782,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"101 Switching Protocols","originalText":"101 Switching Protocols","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e3acf5aad","type":"arrow","x":100,"y":505,"width":360,"height":0,"angle":0,"strokeColor":"#1971c2","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":398040451,"version":1,"versionNonce":338299411,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[360,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":"arrow","endArrowhead":"arrow","elbowed":false},{"id":"e226fcb80","type":"text","x":179.89999999999998,"y":487,"width":200.20000000000002,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":957401071,"version":1,"versionNonce":7779714,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"messages both ways, any time","originalText":"messages both ways, any time","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e21b1f2ed","type":"arrow","x":100,"y":550,"width":360,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":781987588,"version":1,"versionNonce":2065420853,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[360,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e2a1a40ac","type":"text","x":215.64999999999998,"y":532,"width":128.70000000000002,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":2088691973,"version":1,"versionNonce":2115080917,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"FIN … ACK  (close)","originalText":"FIN … ACK  (close)","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4606801a","type":"text","x":485,"y":186,"width":193.05,"height":32.5,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":694783758,"version":1,"versionNonce":524944859,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"① TCP handshake\n1 round trip (TLS adds 1–2)","originalText":"① TCP handshake\n1 round trip (TLS adds 1–2)","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e468c009","type":"text","x":485,"y":325,"width":214.50000000000003,"height":32.5,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":2073753588,"version":1,"versionNonce":1894915036,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"② keep-alive: same connection,\nno new handshake","originalText":"② keep-alive: same connection,\nno new handshake","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e279f4430","type":"text","x":485,"y":436,"width":100.10000000000001,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":467863373,"version":1,"versionNonce":765758129,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"③ upgrade once","originalText":"③ upgrade once","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e176b2a09","type":"text","x":485,"y":496,"width":200.20000000000002,"height":16.25,"angle":0,"strokeColor":"#1971c2","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":2295477,"version":1,"versionNonce":720121671,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"④ WebSocket: server can push","originalText":"④ WebSocket: server can push","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e30d92407","type":"rectangle","x":760,"y":140,"width":150,"height":60,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["clients"],"frameId":null,"roundness":{"type":3},"seed":180153606,"version":1,"versionNonce":1019289434,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e23b3f0fe","type":"text","x":806.125,"y":160.625,"width":57.75000000000001,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["clients"],"frameId":null,"roundness":null,"seed":1079677478,"version":1,"versionNonce":1408787664,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Clients","originalText":"Clients","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e19b9b6e7","type":"rectangle","x":760,"y":250,"width":150,"height":60,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#e9ecef","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["lb"],"frameId":null,"roundness":{"type":3},"seed":532961197,"version":1,"versionNonce":1083911527,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e635bc4f8","type":"text","x":781.375,"y":270.625,"width":107.25000000000001,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["lb"],"frameId":null,"roundness":null,"seed":10631190,"version":1,"versionNonce":195102539,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Load balancer","originalText":"Load balancer","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e21d04784","type":"rectangle","x":960,"y":140,"width":180,"height":60,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["api"],"frameId":null,"roundness":{"type":3},"seed":1754589236,"version":1,"versionNonce":192743953,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e126a2c4f","type":"text","x":975.75,"y":151.25,"width":148.5,"height":37.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["api"],"frameId":null,"roundness":null,"seed":857943701,"version":1,"versionNonce":1260144980,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"API servers\n(HTTP · stateless)","originalText":"API servers\n(HTTP · stateless)","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e55557c1","type":"rectangle","x":960,"y":250,"width":180,"height":70,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffd8a8","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["ws"],"frameId":null,"roundness":{"type":3},"seed":846062698,"version":1,"versionNonce":48305824,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e265acd54","type":"text","x":980.7,"y":258.75,"width":138.60000000000002,"height":52.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["ws"],"frameId":null,"roundness":null,"seed":653360215,"version":1,"versionNonce":1352205775,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"WebSocket gateways\n(stateful: hold\nconnections)","originalText":"WebSocket gateways\n(stateful: hold\nconnections)","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e1dccb439","type":"rectangle","x":1200,"y":140,"width":140,"height":60,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#b2f2bb","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["db"],"frameId":null,"roundness":{"type":3},"seed":181425240,"version":1,"versionNonce":1257530528,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e7a93dae2","type":"text","x":1237.0,"y":160.625,"width":66.0,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["db"],"frameId":null,"roundness":null,"seed":1136425890,"version":1,"versionNonce":1832335048,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Database","originalText":"Database","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6011b725","type":"rectangle","x":1200,"y":250,"width":140,"height":70,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#d0bfff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["ps"],"frameId":null,"roundness":{"type":3},"seed":333401433,"version":1,"versionNonce":1412064283,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e72474f02","type":"text","x":1241.125,"y":266.25,"width":57.75000000000001,"height":37.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["ps"],"frameId":null,"roundness":null,"seed":1537584206,"version":1,"versionNonce":1683715456,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Pub/sub\n(Redis)","originalText":"Pub/sub\n(Redis)","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e70860b3f","type":"arrow","x":835,"y":200,"width":0,"height":50,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1281101364,"version":1,"versionNonce":836480251,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[0,50]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e61d4f445","type":"arrow","x":910,"y":280,"width":50,"height":110,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":700369045,"version":1,"versionNonce":1547642646,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[50,-110]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e7e0b9a4d","type":"text","x":925,"y":208,"width":28.6,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1061266563,"version":1,"versionNonce":320969677,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"HTTP","originalText":"HTTP","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e245fe5e8","type":"arrow","x":910,"y":285,"width":50,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1555112682,"version":1,"versionNonce":1328663531,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[50,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e525503db","type":"text","x":854.9,"y":314,"width":100.10000000000001,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":310853019,"version":1,"versionNonce":94034160,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"ws:// (sticky)","originalText":"ws:// (sticky)","fontSize":13,"fontFamily":5,"textAlign":"right","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6994eb2f","type":"arrow","x":1140,"y":170,"width":60,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1793770640,"version":1,"versionNonce":1535474426,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[60,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e722b2acf","type":"text","x":1127.1,"y":152,"width":85.80000000000001,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1101618755,"version":1,"versionNonce":1347185481,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"read / write","originalText":"read / write","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e36f17d90","type":"arrow","x":1140,"y":180,"width":60,"height":90,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1575935438,"version":1,"versionNonce":1505500479,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[60,90]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e67f6ca1e","type":"text","x":1150,"y":216,"width":92.95,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1085641114,"version":1,"versionNonce":299160814,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"publish event","originalText":"publish event","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e747732d1","type":"arrow","x":1200,"y":295,"width":60,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1124760195,"version":1,"versionNonce":1616769911,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[-60,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e408f3b0c","type":"text","x":1087.775,"y":328,"width":164.45000000000002,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1220800418,"version":1,"versionNonce":1793014830,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"push to connected users","originalText":"push to connected users","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e680d48a7","type":"rectangle","x":0,"y":600,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note1"],"frameId":null,"roundness":{"type":3},"seed":1728032015,"version":1,"versionNonce":34531019,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e69c7c623","type":"text","x":10,"y":609,"width":214.50000000000003,"height":97.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note1"],"frameId":null,"roundness":null,"seed":1474186837,"version":1,"versionNonce":1254262545,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"① TCP first\nEvery connection starts with a\n3-message handshake: one round\ntrip (TLS adds 1–2). Opening\nconnections is the expensive\npart.","originalText":"① TCP first\nEvery connection starts with a\n3-message handshake: one round\ntrip (TLS adds 1–2). Opening\nconnections is the expensive\npart.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6623c9ec","type":"rectangle","x":225,"y":600,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note2"],"frameId":null,"roundness":{"type":3},"seed":1917337253,"version":1,"versionNonce":1527260611,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e57691d88","type":"text","x":235,"y":609,"width":207.35000000000002,"height":81.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note2"],"frameId":null,"roundness":null,"seed":2053161236,"version":1,"versionNonce":1488906539,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"② Reuse the connection\nHTTP/1.1 keeps it open (keep-\nalive). HTTP/2 lets many\nrequests share one connection\nat the same time.","originalText":"② Reuse the connection\nHTTP/1.1 keeps it open (keep-\nalive). HTTP/2 lets many\nrequests share one connection\nat the same time.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e524a368b","type":"rectangle","x":450,"y":600,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note3"],"frameId":null,"roundness":{"type":3},"seed":493793940,"version":1,"versionNonce":182733056,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e3fd117c","type":"text","x":460,"y":609,"width":207.35000000000002,"height":97.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note3"],"frameId":null,"roundness":null,"seed":89898181,"version":1,"versionNonce":285815457,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"③ WebSocket\nStarts as HTTP, upgrades once\n(101), then both sides send\nany time. For chat, live\nscores — anything the server\nmust push often.","originalText":"③ WebSocket\nStarts as HTTP, upgrades once\n(101), then both sides send\nany time. For chat, live\nscores — anything the server\nmust push often.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e518d24ef","type":"rectangle","x":675,"y":600,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note4"],"frameId":null,"roundness":{"type":3},"seed":774613398,"version":1,"versionNonce":2060545085,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"ed6de72f","type":"text","x":685,"y":609,"width":207.35000000000002,"height":81.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note4"],"frameId":null,"roundness":null,"seed":808781558,"version":1,"versionNonce":1794912354,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"④ Gateways are stateful\nA user is attached to one\ngateway. Fan out through\npub/sub so any API server can\nreach any connected user.","originalText":"④ Gateways are stateful\nA user is attached to one\ngateway. Fan out through\npub/sub so any API server can\nreach any connected user.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e39c705bc","type":"rectangle","x":900,"y":600,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note5"],"frameId":null,"roundness":{"type":3},"seed":1199428130,"version":1,"versionNonce":109049899,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e505aac33","type":"text","x":910,"y":609,"width":214.50000000000003,"height":81.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note5"],"frameId":null,"roundness":null,"seed":40460037,"version":1,"versionNonce":1344811085,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"⑤ Pick the method\nRare updates: short polling.\nServer-only push: SSE. Both\nways, instant: WebSocket. Long\npolling: the fallback.","originalText":"⑤ Pick the method\nRare updates: short polling.\nServer-only push: SSE. Both\nways, instant: WebSocket. Long\npolling: the fallback.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e44065a01","type":"rectangle","x":1125,"y":600,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note6"],"frameId":null,"roundness":{"type":3},"seed":1461715186,"version":1,"versionNonce":525187912,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e3ea13238","type":"text","x":1135,"y":609,"width":214.50000000000003,"height":81.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note6"],"frameId":null,"roundness":null,"seed":566490942,"version":1,"versionNonce":7117467,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"⑥ Protocol = agreed format\nHTTP, Redis's RESP and gRPC\nall ride on TCP. UDP only for\nlive audio / video, where late\ndata is useless.","originalText":"⑥ Protocol = agreed format\nHTTP, Redis's RESP and gRPC\nall ride on TCP. UDP only for\nlive audio / video, where late\ndata is useless.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true}]}</script>
+  </section>
+
+  <!-- 1 -->
+  <section id="model" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">1</span>
+      <div>
+        <h2>The client-server model</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 0:00</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>This is the most common way two machines talk to each other. One machine plays the <span class="term">client</span>: it asks for something to be done. The other plays the <span class="term">server</span>: it does the heavy work and sends back the result.</p>
+      <p>Every request has the same shape — “hey server, do this for me”:</p>
+      <ul>
+        <li>Give me the profile with this ID.</li>
+        <li>Delete the post with this ID.</li>
+        <li>Start a new virtual machine for me.</li>
+        <li>Send an email to this user.</li>
+      </ul>
+      <p>“Client” does not only mean a person’s device. It can be a web browser, a phone app, or another backend server. Whoever is asking is the client for that conversation.</p>
+      <p>What do two separate machines have in common? Only the network between them. So all communication between client and server travels over the network, and the rest of this lesson is about the rules for that travel.</p>
+    </div>
+
+    <figure>
+      <p class="cap">Many kinds of client, one way of talking</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 200" role="img" aria-label="A web browser, a mobile app and another server are all clients. Each sends a request across the network to the server, and the server sends a response back.">
+          <text x="91" y="16" text-anchor="middle" class="t-mono t-muted">CLIENTS · ASK</text>
+          <text x="667" y="16" text-anchor="middle" class="t-mono t-muted">SERVER · ANSWERS</text>
+
+          <path class="wire" d="M166 51C240 51 230 100 300 104"/>
+          <path class="wire" d="M166 107H300"/>
+          <path class="wire" d="M166 163C240 163 230 114 300 110"/>
+          <path class="wire accent" d="M470 99H588" marker-end="url(#ah-accent)"/>
+          <path class="wire teal" d="M590 116H472" marker-end="url(#ah-teal)"/>
+          <text x="529" y="88" text-anchor="middle" class="t-mono t-accent">request</text>
+          <text x="529" y="136" text-anchor="middle" class="t-mono t-teal">response</text>
+
+          <rect class="node" x="16" y="30" width="150" height="42" rx="10"/>
+          <text x="91" y="56" text-anchor="middle">Web browser</text>
+          <rect class="node" x="16" y="86" width="150" height="42" rx="10"/>
+          <text x="91" y="112" text-anchor="middle">Mobile app</text>
+          <rect class="node" x="16" y="142" width="150" height="42" rx="10"/>
+          <text x="91" y="168" text-anchor="middle">Another server</text>
+
+          <rect class="node ghost" x="300" y="84" width="170" height="46" rx="23"/>
+          <text x="385" y="112" text-anchor="middle" class="t-muted">the network</text>
+          <text x="385" y="160" text-anchor="middle" class="t-muted">“give me profile 42”</text>
+
+          <rect class="node main" x="590" y="72" width="154" height="70" rx="10"/>
+          <text x="667" y="103" text-anchor="middle" class="t-b">Server</text>
+          <text x="667" y="122" text-anchor="middle" class="t-muted">does the work</text>
+        </svg>
+      </div>
+    </figure>
+  </section>
+
+  <!-- 2 -->
+  <section id="tcp" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">2</span>
+      <div>
+        <h2>TCP: the reliable pipe underneath</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 0:59</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>There are two well-known sets of rules for moving data between machines: <span class="term">TCP</span> and <span class="term">UDP</span>. The lesson’s position is simple. UDP matters for a small set of special applications. Almost everything else — web apps, backend APIs, databases — uses TCP. So the lesson sets UDP aside and goes deeper on TCP.</p>
+      <p>Why TCP? Because it is <strong>reliable</strong>. You hand it some data, and it takes care of cutting the data into small pieces, sending them, putting them back in the right order on the other side, and re-sending any piece that got lost on the way. Your code never has to think about that.</p>
+      <p>You do not need TCP’s internals for system design, but you must know three things about how its connections behave.</p>
+    </div>
+
+    <div class="grid-3">
+      <div class="card">
+        <span class="k">Property 1 · ▶ 2:01</span>
+        <h3>Opening takes three messages</h3>
+        <p>Before any real data moves, the client says “can we talk?”, the server says “yes”, and the client confirms. This is the <span class="term">three-way handshake</span>.</p>
+        <p>Each message crosses the whole network. If the two machines are far apart, that is slow. So opening a connection is expensive.</p>
+      </div>
+      <div class="card amber">
+        <span class="k">Property 2 · ▶ 3:09</span>
+        <h3>Closing takes two messages</h3>
+        <p>When either side is finished, it says “please end this connection” and the other side says “OK”. The lesson calls this the <span class="term">two-way teardown</span>.</p>
+        <p>So a connection that is opened and closed always costs 3 + 2 extra messages.</p>
+      </div>
+      <div class="card teal">
+        <span class="k">Property 3 · ▶ 3:45</span>
+        <h3>It does not close by itself</h3>
+        <p>Many people think the connection ends once the response arrives. It does not. TCP has no such rule.</p>
+        <p>It ends only when the network between the two breaks, or when the client or the server chooses to close it. Until then it stays open — almost forever.</p>
+      </div>
+    </div>
+
+    <figure>
+      <p class="cap">The life of one TCP connection, as the lesson describes it</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 350" role="img" aria-label="A timeline between client and server. Setup takes three messages: can we talk, yes I hear you, good starting. Then the real work: a request and a response. Teardown takes two messages: I am done, OK closed.">
+          <path class="wire dash" d="M225 44V340"/>
+          <path class="wire dash" d="M615 44V340"/>
+          <rect class="node" x="170" y="10" width="110" height="34" rx="8"/>
+          <text x="225" y="32" text-anchor="middle" class="t-b">Client</text>
+          <rect class="node main" x="560" y="10" width="110" height="34" rx="8"/>
+          <text x="615" y="32" text-anchor="middle" class="t-b">Server</text>
+
+          <text x="20" y="104" class="t-mono t-b">SETUP</text>
+          <text x="20" y="122" class="t-muted">3 messages</text>
+          <path class="wire" d="M150 62H142V160H150"/>
+          <path class="wire" d="M225 70L613 84" marker-end="url(#ah)"/>
+          <text x="420" y="66" text-anchor="middle">1 · “Can we talk?”</text>
+          <path class="wire" d="M615 106L227 120" marker-end="url(#ah)"/>
+          <text x="420" y="102" text-anchor="middle">2 · “Yes, I hear you.”</text>
+          <path class="wire" d="M225 142L613 156" marker-end="url(#ah)"/>
+          <text x="420" y="138" text-anchor="middle">3 · “Good. Starting.”</text>
+
+          <text x="20" y="214" class="t-mono t-b">DATA</text>
+          <text x="20" y="232" class="t-muted">the real work</text>
+          <path class="wire" d="M150 186H142V248H150"/>
+          <path class="wire accent" d="M225 194L613 208" marker-end="url(#ah-accent)"/>
+          <text x="420" y="190" text-anchor="middle" class="t-accent">request</text>
+          <path class="wire teal" d="M615 230L227 244" marker-end="url(#ah-teal)"/>
+          <text x="420" y="226" text-anchor="middle" class="t-teal">response</text>
+
+          <text x="20" y="302" class="t-mono t-b">TEARDOWN</text>
+          <text x="20" y="320" class="t-muted">2 messages</text>
+          <path class="wire" d="M150 274H142V336H150"/>
+          <path class="wire" d="M225 282L613 296" marker-end="url(#ah)"/>
+          <text x="420" y="278" text-anchor="middle">“I am done.”</text>
+          <path class="wire" d="M615 318L227 332" marker-end="url(#ah)"/>
+          <text x="420" y="314" text-anchor="middle">“OK, closed.”</text>
+        </svg>
+      </div>
+      <figcaption>Five of these seven messages carry no useful data. They are the price of opening and closing. The whole lesson keeps coming back to one question: how often do you pay that price?</figcaption>
+    </figure>
+
+    <div class="callout key">
+      <span class="cap">Key idea</span>
+      <p>TCP never forces a connection to end. The client and the server decide when to close it. Keep this in mind — both keep-alive (section 4) and WebSocket (section 5) are built on it.</p>
+    </div>
+  </section>
+
+  <!-- 3 -->
+  <section id="protocol" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">3</span>
+      <div>
+        <h2>A protocol is just an agreed format</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 5:05</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>TCP moves bytes from one machine to another. That is all. It does not say what those bytes should be, and it does not understand them.</p>
+      <p>So the client and the server must agree on a format. The lesson compares it to people: if I speak a language you do not know, my words reach your ears but you cannot act on them. We need a common language. Between machines, that common language is called a <span class="term">protocol</span>.</p>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <span class="k">The layer below</span>
+        <h3>TCP — delivery</h3>
+        <p>Gets the bytes across reliably and in order. Has no idea whether they are a web page, a chat message or a database command.</p>
+      </div>
+      <div class="card teal">
+        <span class="k">The layer on top</span>
+        <h3>The protocol — meaning</h3>
+        <p>Says how to read those bytes: where a message starts and ends, which part is the command, which part is the data. HTTP, WebSocket and Redis’s own format all live here.</p>
+      </div>
+    </div>
+    <div class="prose">
+      <h3>HTTP is the common language <span class="ts">▶ 6:55</span></h3>
+      <p>By far the most common protocol is <span class="term">HTTP</span>. The client writes its request in the HTTP format. The server sees bytes in that shape, recognises them as an HTTP request, does the work, and writes the answer in the HTTP response format, which the client understands in turn.</p>
+      <p>HTTP has a written specification — what a request line looks like, what headers are, where the body goes — so that any client and any server built by different people can still understand each other. That is why the web runs on it.</p>
+
+      <h3>You can define your own <span class="ts">▶ 8:11</span></h3>
+      <p>Because TCP does not insist on HTTP, nothing stops you from inventing a format. The lesson’s example is a small key-value store (a database that only saves and fetches values by name). Its whole protocol could be:</p>
+<pre><code><span class="c"># client sends this text over the TCP connection, ending with a newline</span>
+GET username\n
+
+<span class="c"># server reads up to the newline, splits on the space:</span>
+<span class="c">#   first word  = the command to run   (GET)</span>
+<span class="c">#   the rest    = its arguments        (username)</span></code></pre>
+      <p>If your client sends data this way and your server knows how to read it, you have a working protocol.</p>
+      <p>This is not just theory. Redis, a very popular in-memory database, does not use HTTP to get, set or delete a key. It defines its own format, tuned for its own job. Many databases and tools do the same. The price is that you need a special client library that speaks that format, because a browser or a generic HTTP tool cannot.</p>
+    </div>
+    <div class="callout key">
+      <span class="cap">Key idea</span>
+      <p>TCP delivers the bytes. What the bytes mean is up to you. Most APIs you write will speak HTTP, but HTTP is a choice, not a law. Stay open to other options.</p>
+    </div>
+  </section>
+
+  <!-- 4 -->
+  <section id="http" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">4</span>
+      <div>
+        <h2>HTTP/1.1 and the keep-alive header</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 10:50</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>HTTP comes in several versions: HTTP/1.1, HTTP/2 and HTTP/3. HTTP/1.1 is still the most widely used in production. Part of the world has moved to HTTP/2 and a small part to HTTP/3, and both are improvements built on the same ideas. So HTTP/1.1 is the minimum you must know. The lesson gives four points.</p>
+      <ol>
+        <li><strong>It needs a TCP connection first.</strong> Before the client can send an HTTP request, the three-way handshake has to happen.</li>
+        <li><strong>The connection is typically closed once the response is sent.</strong> Client sends a request, server sends the response, and the server ends the connection.</li>
+        <li><strong>So you get almost a new connection for every request.</strong> To carry one request and one response you pay three messages to open and two to close. That is expensive.</li>
+        <li><strong>Hence the <code>Connection: keep-alive</code> header.</strong> The client adds it to the request to say: “please do not close this, I may use it again.” If the server supports the header, it leaves the connection open and the next request skips the handshake. Whether to honour it is the server’s decision.</li>
+      </ol>
+    </div>
+
+    <figure>
+      <p class="cap">Three requests, with and without reusing the connection</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 160" role="img" aria-label="Without keep-alive, each of three requests has its own open and close, costing fifteen extra messages. With keep-alive, the connection is opened once, carries all three requests, and is closed once, costing five extra messages.">
+          <text x="20" y="50" class="t-b">New connection each time</text>
+          <text x="20" y="68" class="t-red">15 extra messages</text>
+          <g>
+            <rect class="node dead" x="214" y="34" width="54" height="40" rx="6"/><text x="241" y="58" text-anchor="middle" class="t-mono">open</text>
+            <rect class="node main" x="271" y="34" width="62" height="40" rx="6"/><text x="302" y="58" text-anchor="middle" class="t-mono">req+res</text>
+            <rect class="node dead" x="336" y="34" width="46" height="40" rx="6"/><text x="359" y="58" text-anchor="middle" class="t-mono">close</text>
+
+            <rect class="node dead" x="394" y="34" width="54" height="40" rx="6"/><text x="421" y="58" text-anchor="middle" class="t-mono">open</text>
+            <rect class="node main" x="451" y="34" width="62" height="40" rx="6"/><text x="482" y="58" text-anchor="middle" class="t-mono">req+res</text>
+            <rect class="node dead" x="516" y="34" width="46" height="40" rx="6"/><text x="539" y="58" text-anchor="middle" class="t-mono">close</text>
+
+            <rect class="node dead" x="574" y="34" width="54" height="40" rx="6"/><text x="601" y="58" text-anchor="middle" class="t-mono">open</text>
+            <rect class="node main" x="631" y="34" width="62" height="40" rx="6"/><text x="662" y="58" text-anchor="middle" class="t-mono">req+res</text>
+            <rect class="node dead" x="696" y="34" width="46" height="40" rx="6"/><text x="719" y="58" text-anchor="middle" class="t-mono">close</text>
+          </g>
+
+          <text x="20" y="120" class="t-b">With keep-alive</text>
+          <text x="20" y="138" class="t-teal">5 extra messages</text>
+          <g>
+            <rect class="node dead" x="214" y="104" width="54" height="40" rx="6"/><text x="241" y="128" text-anchor="middle" class="t-mono">open</text>
+            <rect class="node main" x="271" y="104" width="62" height="40" rx="6"/><text x="302" y="128" text-anchor="middle" class="t-mono">req+res</text>
+            <rect class="node main" x="336" y="104" width="62" height="40" rx="6"/><text x="367" y="128" text-anchor="middle" class="t-mono">req+res</text>
+            <rect class="node main" x="401" y="104" width="62" height="40" rx="6"/><text x="432" y="128" text-anchor="middle" class="t-mono">req+res</text>
+            <rect class="node dead" x="466" y="104" width="46" height="40" rx="6"/><text x="489" y="128" text-anchor="middle" class="t-mono">close</text>
+          </g>
+          <text x="528" y="129" class="t-muted">same three requests, one connection</text>
+        </svg>
+      </div>
+      <figcaption>“Open” is the three-message handshake and “close” is the two-message teardown. Blue blocks are the only part that does useful work.</figcaption>
+    </figure>
+
+    <div class="prose">
+      <p>Notice how this ties back to section 2. TCP itself never asked for the connection to be closed. Closing after each response is a habit of how HTTP is used, and keep-alive is simply the client and server agreeing not to do it. As the lesson puts it: there are no hard rules here, everything is flexible.</p>
+    </div>
+    <div class="callout added">
+      <span class="cap">Note added · not in the video</span>
+      <p>The cost argument above is exactly right. One detail is worth correcting before an interview: in the official HTTP/1.1 standard, connections stay open <em>by default</em>. Closing after every response was the behaviour of the older HTTP/1.0. Section 7.2 explains.</p>
+    </div>
+  </section>
+
+  <!-- 5 -->
+  <section id="websocket" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">5</span>
+      <div>
+        <h2>WebSocket: when the server needs to speak first</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 14:05</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>With HTTP, the client always speaks first. The server can only answer. It can never start a message on its own. The lesson calls this one-directional communication.</p>
+      <p>That is a real limit. Think of a messaging app. A new message for you has arrived at the server — how does it reach your phone?</p>
+      <h3>The HTTP way: keep asking <span class="ts">▶ 15:05</span></h3>
+      <p>Your app asks the server every few seconds: “any new message? any new message? any new message?” This is called <span class="term">short polling</span>. It works, but it is wasteful. Most answers are “no”, every ask costs a request, and a message can sit on the server until the next ask.</p>
+      <h3>The WebSocket way: the server pushes <span class="ts">▶ 15:45</span></h3>
+      <p><span class="term">WebSocket</span> is a protocol built for <span class="term">bi-directional</span> communication — both sides can send, at any time. Its key feature: <strong>the server can send data to the client without the client asking for it.</strong></p>
+      <p>How it works:</p>
+      <ol>
+        <li>The client opens the connection. It has to be the client, because the server does not know the client’s address until the client reaches out.</li>
+        <li>This is a normal TCP connection, opened with the normal three-way handshake.</li>
+        <li>After that, nobody closes it. It stays open until one side decides to end it or the network breaks.</li>
+        <li>Messages flow in both directions, one after another, for as long as it is open.</li>
+      </ol>
+    </div>
+
+    <div class="grid-2">
+      <figure style="margin:0">
+        <p class="cap">Short polling over HTTP</p>
+        <svg class="dia" viewBox="0 0 340 262" role="img" aria-label="The client asks any new message three times, waiting a few seconds in between. The server answers no twice and then yes with the message.">
+          <text x="50" y="16" text-anchor="middle" class="t-mono t-muted">CLIENT</text>
+          <text x="290" y="16" text-anchor="middle" class="t-mono t-muted">SERVER</text>
+          <path class="wire dash" d="M50 24V252"/>
+          <path class="wire dash" d="M290 24V252"/>
+
+          <text x="170" y="40" text-anchor="middle">“any new message?”</text>
+          <path class="wire accent" d="M50 46H288" marker-end="url(#ah-accent)"/>
+          <text x="170" y="66" text-anchor="middle" class="t-muted">“no”</text>
+          <path class="wire" d="M290 72H52" marker-end="url(#ah)"/>
+          <text x="170" y="94" text-anchor="middle" class="t-mono t-muted">… waits a few seconds …</text>
+
+          <text x="170" y="116" text-anchor="middle">“any new message?”</text>
+          <path class="wire accent" d="M50 122H288" marker-end="url(#ah-accent)"/>
+          <text x="170" y="142" text-anchor="middle" class="t-muted">“no”</text>
+          <path class="wire" d="M290 148H52" marker-end="url(#ah)"/>
+          <text x="170" y="170" text-anchor="middle" class="t-mono t-muted">… waits a few seconds …</text>
+
+          <text x="170" y="192" text-anchor="middle">“any new message?”</text>
+          <path class="wire accent" d="M50 198H288" marker-end="url(#ah-accent)"/>
+          <text x="170" y="220" text-anchor="middle" class="t-teal">“yes: hi!”</text>
+          <path class="wire teal" d="M290 226H52" marker-end="url(#ah-teal)"/>
+        </svg>
+        <figcaption>The client does all the asking. Most trips are wasted, and the message waits for the next ask.</figcaption>
+      </figure>
+      <figure style="margin:0">
+        <p class="cap">WebSocket</p>
+        <svg class="dia" viewBox="0 0 340 262" role="img" aria-label="The client connects once and the connection stays open. After that the server and the client each send messages whenever they have one, with no closing in between.">
+          <text x="50" y="16" text-anchor="middle" class="t-mono t-muted">CLIENT</text>
+          <text x="290" y="16" text-anchor="middle" class="t-mono t-muted">SERVER</text>
+          <path class="wire dash" d="M50 24V252"/>
+          <path class="wire dash" d="M290 24V252"/>
+
+          <text x="170" y="40" text-anchor="middle" class="t-muted">connect once, stay open</text>
+          <path class="wire dash" d="M52 46H288" marker-start="url(#ah)" marker-end="url(#ah)"/>
+
+          <text x="170" y="88" text-anchor="middle" class="t-teal">“hi!”</text>
+          <path class="wire teal" d="M290 94H52" marker-end="url(#ah-teal)"/>
+          <text x="170" y="128" text-anchor="middle" class="t-accent">“hello!”</text>
+          <path class="wire accent" d="M50 134H288" marker-end="url(#ah-accent)"/>
+          <text x="170" y="168" text-anchor="middle" class="t-teal">“how are you?”</text>
+          <path class="wire teal" d="M290 174H52" marker-end="url(#ah-teal)"/>
+          <text x="170" y="208" text-anchor="middle" class="t-accent">“good, you?”</text>
+          <path class="wire accent" d="M50 214H288" marker-end="url(#ah-accent)"/>
+          <text x="170" y="244" text-anchor="middle" class="t-mono t-muted">no closing in between</text>
+        </svg>
+        <figcaption>Either side sends the moment it has something. The server’s “hi!” arrives without the client asking.</figcaption>
+      </figure>
+    </div>
+
+    <div class="prose">
+      <h3>Why it is fast <span class="ts">▶ 16:47</span></h3>
+      <p>Because the connection is set up only once, there is no handshake and no teardown around each message. The only delay left is the time to send the data itself. That is what people mean by <span class="term">low latency</span> — a short wait between something happening and you seeing it.</p>
+      <p>Compare that with doing the same over HTTP/1.1 as described in section 4: handshake, one request, one response, teardown — and then all of it again for the next message.</p>
+
+      <h3>Then why not use WebSocket for everything? <span class="ts">▶ 17:51</span></h3>
+      <p>Because open connections are costly. Every connection that stays open takes up resources on your server, even when nothing is being sent. Keeping thousands or millions of them alive, and managing them, is a real burden — the lesson calls it “a huge pain”.</p>
+      <p>So a permanent connection only makes sense when you truly need one. For ordinary request-and-response work, most companies simply accept the overhead of HTTP, because it is fine.</p>
+    </div>
+    <div class="callout key">
+      <span class="cap">The lesson’s rule</span>
+      <p>Whenever you need “real-time”, “low-latency” communication with your end user over the internet, and the server has to push data without being asked, think WebSocket. Examples from the lesson: chat, live likes floating up on a live stream, and stock prices that tick every second in a trading app.</p>
+    </div>
+  </section>
+
+  <!-- 6 -->
+  <section id="pick" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">6</span>
+      <div>
+        <h2>Which one when</h2>
+        <div class="sec-meta"><span class="badge">From the video · summary</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The three options from the lesson, side by side. All three ride on TCP.</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th></th><th>HTTP/1.1</th><th>WebSocket</th><th>Your own format</th></tr></thead>
+        <tbody>
+          <tr><th>Who can start a message?</th><td>Only the client</td><td>Either side</td><td>Whatever you design</td></tr>
+          <tr><th>How long does the connection live?</th><td>Typically one request and response; longer with keep-alive</td><td>Until someone closes it</td><td>Whatever you design</td></tr>
+          <tr><th>Cost per message</th><td>High if you reconnect each time</td><td>Low — only the data itself</td><td>As low as you can make it</td></tr>
+          <tr><th>Cost on the server</th><td>Low — nothing stays open for long</td><td>High — every user holds an open connection</td><td>Depends on the design</td></tr>
+          <tr><th>Who can talk to it?</th><td>Everything: browsers, apps, tools</td><td>Browsers and apps, with some extra care</td><td>Only clients written for it</td></tr>
+          <tr><th>Good for</th><td>Normal APIs: fetch a profile, place an order</td><td>Chat, live reactions, stock prices</td><td>Databases and tools, such as Redis</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 7 -->
+  <section id="deeper" class="extra">
+    <div class="sec-head">
+      <span class="sec-num">7</span>
+      <div>
+        <h2>Going deeper</h2>
+        <div class="sec-meta"><span class="badge">Extra depth · not in the video</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson stops at section 6. This section adds the precise details behind its simplified picture, and the follow-up topics an interviewer is likely to raise.</p>
+
+      <h3>7.1 · The handshake, with its real names and real cost</h3>
+      <p>The three setup messages have names. The client sends <code>SYN</code> (“synchronise”), the server replies <code>SYN-ACK</code>, and the client replies <code>ACK</code> (“acknowledged”).</p>
+      <p>Closing is slightly more than the lesson’s two messages. A TCP connection is really two one-way streams, and each side closes its own: it sends <code>FIN</code> (“finished”) and the other side replies <code>ACK</code>. So a full, polite close is up to four messages. The lesson’s “I am done / OK” is one half of that. The idea is the same: closing is extra traffic.</p>
+      <p>A more useful way to count the cost is in <span class="term">round trips</span> — one message there and one back.</p>
+      <ul>
+        <li>The TCP handshake costs <strong>one round trip</strong> before the client can send its request.</li>
+        <li>HTTPS adds encryption, which needs its own handshake (called TLS) on top: <strong>one more round trip</strong> with the current version, TLS 1.3, and two with the older TLS 1.2.</li>
+      </ul>
+      <p>If a round trip between a user in India and a server in the US takes 200 ms, a brand-new HTTPS connection spends about 400 ms saying hello before the first request even leaves. That is why reusing connections matters so much.</p>
+
+      <h3>7.2 · Keep-alive is actually the default in HTTP/1.1</h3>
+      <p>The lesson says an HTTP/1.1 connection is typically closed after each response unless you send <code>Connection: keep-alive</code>. The cost reasoning is correct, but the versions are mixed up slightly.</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>Version</th><th>What happens after a response</th><th>How to change it</th></tr></thead>
+        <tbody>
+          <tr><th>HTTP/1.0 (older)</th><td>The connection is closed</td><td>Send <code>Connection: keep-alive</code> to ask for it to stay open</td></tr>
+          <tr><th>HTTP/1.1</th><td>The connection stays open, by default</td><td>Send <code>Connection: close</code> to ask for it to be closed</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>Three practical points follow.</p>
+      <ul>
+        <li><strong>“Open” does not mean forever.</strong> Servers close a connection that has been idle for a while (the timeout is a setting, often some seconds to a minute or so), to free up resources.</li>
+        <li><strong>Backends do the same thing on purpose.</strong> A service keeps a small set of already-open connections to its database and to other services, and reuses them. This is called a <span class="term">connection pool</span>. It is keep-alive, applied inside your own system.</li>
+        <li><strong>One request at a time.</strong> On a single HTTP/1.1 connection, the next request has to wait until the previous response has fully arrived. To load a page faster, browsers open several connections to the same site in parallel (about six).</li>
+      </ul>
+
+      <h3>7.3 · What HTTP/2 and HTTP/3 change</h3>
+      <ul>
+        <li><strong>HTTP/2</strong> lets many requests and responses share one TCP connection <em>at the same time</em>, instead of waiting in line. So one connection is enough, and the handshake is paid once.</li>
+        <li><strong>HTTP/3</strong> does not use TCP at all. It runs on a newer protocol called QUIC, which is built on UDP. Setup is quicker, and one lost piece of data no longer holds up every other request on the connection. This is what the lesson means when it says HTTP “can also happen over UDP”.</li>
+      </ul>
+      <p>The meaning of a request — methods, headers, status codes — is the same in all three. Only the way it is carried changes.</p>
+
+      <h3>7.4 · UDP in plain words</h3>
+      <p>The lesson skips UDP. One table is enough for an interview.</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th></th><th>TCP</th><th>UDP</th></tr></thead>
+        <tbody>
+          <tr><th>Setup before sending</th><td>Handshake first</td><td>None — just send</td></tr>
+          <tr><th>If a piece is lost</th><td>It is sent again</td><td>It is gone</td></tr>
+          <tr><th>Order of arrival</th><td>Guaranteed</td><td>Not guaranteed</td></tr>
+          <tr><th>Speed</th><td>Slower — waits to get things right</td><td>Faster — never waits</td></tr>
+          <tr><th>Good for</th><td>Anything that must arrive complete: web pages, APIs, payments, files</td><td>Anything where late data is useless: voice and video calls, online games, DNS lookups</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>The reasoning to remember: on a video call, if a fraction of a second of sound is lost, re-sending it later would only make things worse. You would rather skip it and stay live. That is when UDP wins.</p>
+
+      <h3>7.5 · Four ways to get updates from a server</h3>
+      <p>The lesson compares short polling with WebSocket. There are two options in between, and interviewers often ask you to choose among all four.</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>Method</th><th>How it works</th><th>Use it when</th></tr></thead>
+        <tbody>
+          <tr><th>Short polling</th><td>Client asks every few seconds. Server answers at once, usually “nothing new”.</td><td>Updates are rare and a delay of a few seconds is fine. Simplest to build.</td></tr>
+          <tr><th>Long polling</th><td>Client asks. Server holds the request open and answers only when it has something (or a timeout hits). Client then asks again.</td><td>You need near-instant updates but cannot use the options below.</td></tr>
+          <tr><th>Server-Sent Events (SSE)</th><td>Client makes one ordinary HTTP request. Server keeps the response open and writes events into it as they happen. One direction only: server to client.</td><td>Only the server needs to push: notifications, live scores, a progress bar.</td></tr>
+          <tr><th>WebSocket</th><td>One connection, open both ways, either side sends at any time.</td><td>Both sides send often: chat, multiplayer games, shared editing.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>A quick test: does the client also need to send a lot, quickly? If yes, WebSocket. If only the server pushes, SSE is simpler because it is plain HTTP. If updates are rare, polling is fine.</p>
+
+      <h3>7.6 · How a WebSocket connection really starts</h3>
+      <p>A WebSocket begins life as a normal HTTP request. The client adds a header that says, in effect, “I would like to switch this connection to WebSocket”:</p>
+<pre><code>GET /chat HTTP/1.1
+Host: example.com
+Connection: Upgrade
+Upgrade: websocket</code></pre>
+      <p>If the server agrees, it answers with the status <code>101 Switching Protocols</code>. From that moment the same TCP connection stops carrying HTTP and starts carrying WebSocket messages in both directions.</p>
+      <p>The reason for starting with HTTP is practical: it lets WebSocket pass through the same ports and the same network equipment that already allow web traffic. Addresses start with <code>ws://</code>, or <code>wss://</code> for the encrypted version, just like <code>http://</code> and <code>https://</code>.</p>
+
+      <h3>7.7 · Why WebSockets are hard to run at scale</h3>
+      <p>The lesson says managing WebSockets is a pain. Here is what the pain is made of.</p>
+      <ol>
+        <li><strong>Every open connection uses memory,</strong> even when silent. One million users online means one million open connections that some server must hold.</li>
+        <li><strong>The servers are no longer interchangeable.</strong> With plain HTTP any server can answer any request. With WebSocket, a user is attached to the one server holding their connection. If user A is connected to server 1 and user B to server 2, server 1 cannot reach B directly. You need something in the middle that passes messages between servers — a <span class="term">message bus</span>, often built with a publish/subscribe tool such as Redis pub/sub.</li>
+        <li><strong>The load balancer must allow long-lived connections</strong> and not cut them off as “idle”.</li>
+        <li><strong>Every deploy disconnects everyone</strong> on the restarted servers. All those clients reconnect at the same moment and can flood you. Clients should wait a short random time before retrying.</li>
+        <li><strong>Dead connections look alive.</strong> If a phone loses signal, the server may not notice. Both sides send small “are you there?” messages (called heartbeats, or ping/pong) to find out.</li>
+      </ol>
+    </div>
+
+    <figure>
+      <p class="cap">Getting a message from user A to user B when they are on different servers</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 150" role="img" aria-label="User A holds a WebSocket to gateway 1. User B holds a WebSocket to gateway 2. Gateway 1 publishes A's message to a message bus, which delivers it to gateway 2, which pushes it to user B.">
+          <text x="121" y="46" text-anchor="middle" class="t-mono t-muted">1 · send</text>
+          <text x="295" y="46" text-anchor="middle" class="t-mono t-muted">2 · publish</text>
+          <text x="465" y="46" text-anchor="middle" class="t-mono t-muted">3 · deliver</text>
+          <text x="639" y="46" text-anchor="middle" class="t-mono t-muted">4 · push</text>
+
+          <path class="wire accent" d="M96 85H144" marker-end="url(#ah-accent)"/>
+          <path class="wire" d="M270 85H318" marker-end="url(#ah)"/>
+          <path class="wire" d="M440 85H488" marker-end="url(#ah)"/>
+          <path class="wire teal" d="M614 85H662" marker-end="url(#ah-teal)"/>
+
+          <rect class="node" x="10" y="60" width="86" height="50" rx="10"/>
+          <text x="53" y="90" text-anchor="middle">User A</text>
+          <rect class="node main" x="146" y="60" width="124" height="50" rx="10"/>
+          <text x="208" y="90" text-anchor="middle">Gateway 1</text>
+          <rect class="node copy" x="320" y="60" width="120" height="50" rx="10"/>
+          <text x="380" y="90" text-anchor="middle" class="t-b">Message bus</text>
+          <rect class="node main" x="490" y="60" width="124" height="50" rx="10"/>
+          <text x="552" y="90" text-anchor="middle">Gateway 2</text>
+          <rect class="node" x="664" y="60" width="86" height="50" rx="10"/>
+          <text x="707" y="90" text-anchor="middle">User B</text>
+
+          <text x="121" y="134" text-anchor="middle" class="t-mono t-muted">WebSocket</text>
+          <text x="380" y="134" text-anchor="middle" class="t-mono t-muted">e.g. Redis pub/sub</text>
+          <text x="639" y="134" text-anchor="middle" class="t-mono t-muted">WebSocket</text>
+        </svg>
+      </div>
+      <figcaption>A “gateway” here is a server whose only job is to hold open connections. Each gateway tells the bus which users it is holding, so a message for B is handed to the right one.</figcaption>
+    </figure>
+
+    <div class="prose">
+      <h3>7.8 · What the formats actually look like on the wire</h3>
+      <p>Section 3 said HTTP is “just a format”. Here it is. This text is literally what travels over the TCP connection:</p>
+<pre><code><span class="c"># request</span>
+GET /profile/42 HTTP/1.1
+Host: api.example.com
+Connection: keep-alive
+
+<span class="c"># response</span>
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 26
+
+{"id": 42, "name": "Asha"}</code></pre>
+      <p>And here is the same kind of “get me a value” request in Redis’s own format. It is more compact and quicker for a program to read, but only a Redis client knows how to write it:</p>
+<pre><code>*2\r\n$3\r\nGET\r\n$4\r\nname\r\n
+
+<span class="c"># *2  = two parts follow</span>
+<span class="c"># $3  = the next part is 3 bytes long  -&gt; GET</span>
+<span class="c"># $4  = the next part is 4 bytes long  -&gt; name</span></code></pre>
+      <p>Same job, two formats, one TCP underneath. That is the whole point of section 3.</p>
+    </div>
+  </section>
+
+  <!-- 8 -->
+  <section id="lab" class="lab">
+    <div class="sec-head">
+      <span class="sec-num">8</span>
+      <div>
+        <h2>Hands-on lab</h2>
+        <div class="sec-meta"><span class="badge">Exercise from the video</span><span class="ts">▶ 19:26 · commands added here</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson sets two tasks. First, if you have never done it, write a simple HTTP API in any language — for example a to-do app that saves items to a database and reads them back. Second, and more important: <strong>build a chat application with Socket.IO</strong>, to feel the difference when the server pushes data without being asked.</p>
+      <p>The steps below warm up with two one-minute experiments, then build the chat. You need Node.js installed for steps 3 to 5.</p>
+    </div>
+
+    <ol class="step-list">
+      <li>
+        <b>Watch one HTTP exchange</b>
+        <p>The <code>-v</code> flag makes curl print everything. Lines starting with <code>&gt;</code> are the request it sent. Lines starting with <code>&lt;</code> are the response. Compare them with section 7.8.</p>
+<pre><code>curl -v http://example.com/</code></pre>
+      </li>
+      <li>
+        <b>Watch a connection being reused</b>
+        <p>Ask for the same address twice in one command. Before the second request, curl prints a line saying it is re-using the existing connection. No second handshake — that is keep-alive at work.</p>
+<pre><code>curl -v http://example.com/ http://example.com/</code></pre>
+      </li>
+      <li>
+        <b>Set up the chat project</b>
+        <p>Socket.IO is the library the lesson recommends. Express is a small web server library used here to serve the page.</p>
+<pre><code>mkdir chat &amp;&amp; cd chat
+npm init -y
+npm install express socket.io</code></pre>
+      </li>
+      <li>
+        <b>Write the server and the page</b>
+        <p>The server does one thing: whenever any client sends a <code>chat message</code>, it pushes that message to every connected client. That push is the part plain HTTP cannot do.</p>
+<pre><code><span class="c">// server.js</span>
+const express = require('express');
+const { createServer } = require('node:http');
+const { join } = require('node:path');
+const { Server } = require('socket.io');
+
+const app = express();
+const server = createServer(app);
+const io = new Server(server);
+
+app.get('/', (req, res) =&gt; {
+  res.sendFile(join(__dirname, 'index.html'));
+});
+
+io.on('connection', (socket) =&gt; {
+  socket.on('chat message', (msg) =&gt; {
+    io.emit('chat message', msg);   <span class="c">// push to everyone</span>
+  });
+});
+
+server.listen(3000, () =&gt; {
+  console.log('chat running at http://localhost:3000');
+});</code></pre>
+<pre><code><span class="c">&lt;!-- index.html --&gt;</span>
+&lt;ul id="messages"&gt;&lt;/ul&gt;
+&lt;form id="form"&gt;
+  &lt;input id="input" autocomplete="off"&gt;&lt;button&gt;Send&lt;/button&gt;
+&lt;/form&gt;
+
+&lt;script src="/socket.io/socket.io.js"&gt;&lt;/script&gt;
+&lt;script&gt;
+  const socket = io();   <span class="c">// opens the connection</span>
+  const form = document.getElementById('form');
+  const input = document.getElementById('input');
+  const messages = document.getElementById('messages');
+
+  form.addEventListener('submit', (e) =&gt; {
+    e.preventDefault();
+    if (input.value) {
+      socket.emit('chat message', input.value);
+      input.value = '';
+    }
+  });
+
+  socket.on('chat message', (msg) =&gt; {   <span class="c">// runs when the server pushes</span>
+    const item = document.createElement('li');
+    item.textContent = msg;
+    messages.appendChild(item);
+  });
+&lt;/script&gt;</code></pre>
+      </li>
+      <li>
+        <b>Run it and watch the messages travel</b>
+        <p>Start the server and open <code>http://localhost:3000</code> in two browser tabs. Type in one tab; the message appears in the other at once, although that tab never asked for it.</p>
+<pre><code>node server.js</code></pre>
+        <p>Then open the browser’s developer tools, go to the Network tab and filter by “WS”. Click the connection and open its Messages view. You will see the <code>101 Switching Protocols</code> answer from section 7.6, and then each chat message passing over that one connection.</p>
+      </li>
+    </ol>
+
+    <div class="callout key">
+      <span class="cap">Try next</span>
+      <p>Stop the server with Ctrl+C and start it again while a tab is open. The page reconnects by itself — that is Socket.IO doing the reconnect work from section 7.7. Then try the lesson’s other idea: build the same chat with short polling over plain HTTP and compare how it feels.</p>
+    </div>
+    <div class="callout added">
+      <span class="cap">Good to know</span>
+      <p>Socket.IO is not plain WebSocket. It is a library built on top of it that adds automatic reconnecting, chat rooms, and a fallback to HTTP long polling when a WebSocket cannot be opened. You may even see a few polling requests in the Network tab before the WebSocket appears. A plain WebSocket client cannot talk to a Socket.IO server — both ends must use Socket.IO.</p>
+    </div>
+  </section>
+
+  <!-- 9 -->
+  <section id="interview" class="extra">
+    <div class="sec-head">
+      <span class="sec-num">9</span>
+      <div>
+        <h2>In the interview</h2>
+        <div class="sec-meta"><span class="badge">Extra depth · not in the video</span></div>
+      </div>
+    </div>
+    <div class="callout say">
+      <span class="cap">What to say when you draw the line between client and server</span>
+      <p>“Clients talk to our API over HTTPS. Connections are kept alive and reused, so we are not paying a handshake on every request. For the live part of the product the server has to push, so those clients also hold a WebSocket to a separate gateway service. The gateways are stateful, so I’d put a publish/subscribe layer behind them to route each message to whichever gateway holds the receiver’s connection. Everything else stays plain request and response, because open connections cost memory and make deploys harder.”</p>
+    </div>
+    <div class="prose"><p>Likely follow-ups. Answer each out loud before opening it.</p></div>
+
+    <details class="qa">
+      <summary>Why is opening a new connection for every request slow, and what do you do about it?</summary>
+      <div class="a">
+        <p>Each new connection needs a TCP handshake, and with HTTPS an encryption handshake on top. That is one to three round trips across the network before any useful data moves, plus the close at the end.</p>
+        <p>The fix is to reuse connections: keep-alive between browser and server, connection pools between our services and the database, and HTTP/2 so many requests can share one connection at the same time.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>If WebSocket is faster, why not use it for everything?</summary>
+      <div class="a">
+        <p>It is faster per message, but each user holds an open connection that costs memory even when idle. Servers become stateful, so scaling, load balancing and deploys all get harder.</p>
+        <p>Most API calls are a single ask and a single answer, where none of that pays off. So WebSocket is used only where the server must push or messages are very frequent.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Short polling, long polling, Server-Sent Events or WebSocket — how do you choose?</summary>
+      <div class="a">
+        <p>Ask two things: who needs to send, and how fresh must the data be?</p>
+        <p>Updates are rare and a few seconds’ delay is fine: short polling. Only the server pushes: Server-Sent Events, because it is plain HTTP and simple. Both sides send often and it must feel instant: WebSocket. Long polling is the fallback when the other two cannot be used.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>User A is connected to server 1 and user B to server 2. How does A’s message reach B?</summary>
+      <div class="a">
+        <p>Server 1 cannot push to B, because B’s connection lives on server 2. So server 1 publishes the message to a shared message bus, such as Redis pub/sub. Server 2 is subscribed, receives it, and pushes it down B’s WebSocket.</p>
+        <p>The message is also saved to the database, so B still gets it later if they were offline at that moment.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>What happens to WebSocket users when you deploy a new version?</summary>
+      <div class="a">
+        <p>Every connection on a restarted server is dropped. Clients must reconnect on their own, after a short random wait so they do not all arrive in the same second.</p>
+        <p>On our side we restart servers a few at a time, and stop sending new connections to a server before shutting it down. Anything missed while disconnected is fetched from the database after reconnecting.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>When would you pick UDP over TCP?</summary>
+      <div class="a">
+        <p>When being on time matters more than being complete. In a voice or video call or a fast game, a lost piece of data is useless by the time it could be re-sent, so it is better to skip it and stay live.</p>
+        <p>For anything that must arrive whole and in order — API calls, payments, files — TCP.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Do our internal services have to talk HTTP to each other?</summary>
+      <div class="a">
+        <p>No. TCP carries any format the two sides agree on. Databases such as Redis use their own. Many companies use gRPC between services, which sends compact binary messages over HTTP/2.</p>
+        <p>The trade-off: a custom or binary format is faster and smaller, but harder to inspect and needs special client libraries. Plain HTTP with JSON is slower but every tool and every engineer understands it.</p>
+      </div>
+    </details>
+  </section>
+
+  <nav class="lesson-nav" aria-label="Lessons">
+    <a href="20-leader-election.html"><span>← Lesson 20</span>Leader Election for auto-recovery</a>
+    <a class="next" href="22-blob-storage-s3.html"><span>Lesson 22 →</span>Blob Storage &amp; S3</a>
+  </nav>
+
+  <footer>
+    <p>Notes on lesson 21, “Client-server model &amp; Communication protocols” (21 min 15 s). Blue sections follow the video. Amber sections and amber notes add depth beyond it. The lab uses Node.js with Socket.IO version 4.</p>
+  </footer>
+
+</div>
+
+<script>
+  (function(){
+    var themeBtn = document.getElementById("themeBtn");
+    if (themeBtn) themeBtn.addEventListener("click", function(){
+      var root = document.documentElement;
+      var isDark = root.getAttribute("data-theme") === "dark"
+        || (!root.getAttribute("data-theme") && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+      root.setAttribute("data-theme", isDark ? "light" : "dark");
+    });
+  })();
+</script>
+<script src="../js/vendor/rough.js"></script>
+<script src="../js/sketch.js"></script>
+</body>
+</html>

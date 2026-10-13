@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blob Storage &amp; S3 — notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Patrick+Hand&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../css/notes.css">
+<style>
+  /* page-only: the "anatomy of an S3 address" strip in section 5 */
+  .addr{display:flex;flex-wrap:wrap;align-items:flex-start;gap:2px 0;margin:18px 0;padding:20px 22px 16px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:clamp(.95rem,2.6vw,1.3rem)}
+  .addr .seg{display:flex;flex-direction:column;align-items:center}
+  .addr .seg b{font-weight:500;padding:0 1px 6px;border-bottom:2px solid transparent}
+  .addr .seg small{font-size:.66rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase;margin-top:6px}
+  .addr .plain b{color:var(--muted)}
+  .addr .bucket b{border-color:var(--accent)}
+  .addr .bucket small{color:var(--accent)}
+  .addr .key b{border-color:var(--teal)}
+  .addr .key small{color:var(--teal)}
+  svg.dia .lane{stroke:var(--line-strong);stroke-width:1.2;stroke-dasharray:3 5;fill:none}
+  svg.dia .wire.thick{stroke-width:2.6}
+</style>
+</head>
+<body>
+
+<!-- arrowheads shared by every diagram on the page -->
+<svg class="dia" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head teal" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head red" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head accent" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-teal-sm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="4.5" markerHeight="4.5" orient="auto-start-reverse"><path class="head teal" d="M0 0L10 5L0 10z"/></marker>
+  </defs>
+</svg>
+
+<div class="wrap">
+
+  <header class="hero">
+    <div class="topbar">
+      <p class="eyebrow">Lesson 22 · Storage · Notes</p>
+      <div class="topbar-right">
+        <a class="back" href="../index.html">← Learning plan</a>
+        <button class="toggle" id="themeBtn" type="button">◐ Theme</button>
+      </div>
+    </div>
+    <h1>Blob Storage &amp; S3</h1>
+    <p class="lede">Where do the photos, videos and backups go? Not in the database, and not on the API server’s disk. These notes cover what the lesson says about blob storage, then go deeper on the parts an interviewer will push on.</p>
+    <div class="chips">
+      <span class="chip"><b>15 min 31 s</b> video</span>
+      <span class="chip"><b>Blue</b> sections · from the video</span>
+      <span class="chip"><b style="color:var(--amber)">Amber</b> sections · extra depth</span>
+    </div>
+  </header>
+
+  <div class="tldr">
+    <h2>The whole lesson in six lines</h2>
+    <ol>
+      <li>A <strong>blob</strong> is any file, treated as a plain run of bytes. Blob storage keeps those bytes and gives them back. It never looks inside.</li>
+      <li>In the early days, an uploaded file was saved on the hard disk of the one server that received it — the “static folder.”</li>
+      <li>That breaks as soon as you have several servers: the file sits on one server’s disk, and the next request may land on a different server.</li>
+      <li>The fix is one shared store on the network that every server can reach. On AWS that store is <strong>S3</strong>. The API servers keep no files, so they are stateless again.</li>
+      <li>In S3 a file lives in a <strong>bucket</strong> (a named container) under a <strong>key</strong> (a path-like name). You can create, replace, delete, and read all or part of a file.</li>
+      <li>S3 is cheap, durable and effectively unlimited. In exchange, reads are slower than a local disk, and it is not a real file system.</li>
+    </ol>
+  </div>
+
+  <ul class="toc" aria-label="Contents">
+    <li><a href="#sketch"><b>✎</b>The picture to draw</a></li>
+    <li><a href="#blob"><b>1</b>What a blob is</a></li>
+    <li><a href="#old"><b>2</b>The old way: the server’s disk</a></li>
+    <li><a href="#breaks"><b>3</b>Why that breaks</a></li>
+    <li><a href="#shared"><b>4</b>The fix: one shared store</a></li>
+    <li><a href="#keys"><b>5</b>Buckets and keys</a></li>
+    <li><a href="#tradeoffs"><b>6</b>Strengths, weaknesses, uses</a></li>
+    <li><a href="#deeper"><b>7</b>Going deeper</a></li>
+    <li><a href="#lab"><b>8</b>Hands-on lab</a></li>
+    <li><a href="#interview"><b>9</b>In the interview</a></li>
+  </ul>
+
+  <section id="sketch" class="sketch-sec">
+    <div class="sec-head">
+      <span class="sec-num">✎</span>
+      <div>
+        <h2>The picture to draw</h2>
+        <div class="sec-meta"><span class="badge">Sketch · editable in Excalidraw</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>Follow the numbers: the client asks the API for an upload URL, sends the bytes straight to S3, and the API records one row in the database. Downloads go through the CDN. On the right, the file moves to cheaper storage classes as it ages. Draw this for any question with photos, videos or documents.</p>
+    </div>
+    <div class="paper"><button class="zoom-btn" type="button" data-zoom>⤢ Full size</button><div class="paper-scroll"><svg class="sketch" data-sketch="sk" role="img" aria-label="A client asks the API for a pre-signed URL, uploads the file bytes directly to S3, and the API saves a row in the database. Downloads are served through a CDN. Lifecycle rules move the file from Standard to Infrequent access to Glacier and finally delete it. Notes explain each part."></svg></div></div>
+    <p class="paper-foot"><span class="cap">Sketch · lesson 22</span><span><a class="btn ghost" href="../diagrams/22-blob-storage-s3.excalidraw" download>Download for Excalidraw</a> &nbsp; open it at excalidraw.com → menu → Open</span></p>
+    <script type="application/json" id="sk" data-sketch-src="diagrams/22-blob-storage-s3.excalidraw">{"elements":[{"id":"e3a7d4a0a","type":"text","x":0,"y":0,"width":446.6,"height":35.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1713042459,"version":1,"versionNonce":150563367,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Lesson 22 · Blob storage & S3","originalText":"Lesson 22 · Blob storage & S3","fontSize":28,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e5fc728d6","type":"text","x":0,"y":42,"width":924.0000000000001,"height":20.0,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":2002538489,"version":1,"versionNonce":1080122105,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Files are bytes. Bytes go to blob storage; the database keeps one small row per file. Follow the numbers.","originalText":"Files are bytes. Bytes go to blob storage; the database keeps one small row per file. Follow the numbers.","fontSize":16,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e72ecff41","type":"rectangle","x":0,"y":250,"width":150,"height":80,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["client"],"frameId":null,"roundness":{"type":3},"seed":1149332863,"version":1,"versionNonce":197443792,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e5463ecf1","type":"text","x":17.249999999999993,"y":271.25,"width":115.50000000000001,"height":37.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["client"],"frameId":null,"roundness":null,"seed":1129555250,"version":1,"versionNonce":141842049,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Client\n(web / mobile)","originalText":"Client\n(web / mobile)","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e5f740314","type":"rectangle","x":330,"y":250,"width":170,"height":80,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["api"],"frameId":null,"roundness":{"type":3},"seed":1582240886,"version":1,"versionNonce":1017603220,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e2047e0a4","type":"text","x":369.625,"y":271.25,"width":90.75000000000001,"height":37.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["api"],"frameId":null,"roundness":null,"seed":1737784112,"version":1,"versionNonce":159880154,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"API servers\n(stateless)","originalText":"API servers\n(stateless)","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6c4e1b5a","type":"rectangle","x":315,"y":430,"width":200,"height":90,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#b2f2bb","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["db"],"frameId":null,"roundness":{"type":3},"seed":570281951,"version":1,"versionNonce":504198284,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e5d5ad9ba","type":"text","x":311.05,"y":448.75,"width":207.9,"height":52.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["db"],"frameId":null,"roundness":null,"seed":1624445551,"version":1,"versionNonce":440701292,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Database\none row per file:\nowner · key · size · status","originalText":"Database\none row per file:\nowner · key · size · status","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e1d88c2ed","type":"rectangle","x":680,"y":250,"width":200,"height":90,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#d0bfff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["s3"],"frameId":null,"roundness":{"type":3},"seed":1588769799,"version":1,"versionNonce":1395718935,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e7ce4e33d","type":"text","x":709.875,"y":276.25,"width":140.25,"height":37.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["s3"],"frameId":null,"roundness":null,"seed":988572755,"version":1,"versionNonce":1060746928,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Blob storage (S3)\nbucket / key","originalText":"Blob storage (S3)\nbucket / key","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6c3a5e3d","type":"rectangle","x":680,"y":120,"width":200,"height":60,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#d0bfff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["cdn"],"frameId":null,"roundness":{"type":3},"seed":821542377,"version":1,"versionNonce":164797632,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e3d503479","type":"text","x":714.0,"y":140.625,"width":132.0,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["cdn"],"frameId":null,"roundness":null,"seed":1955212270,"version":1,"versionNonce":1468227196,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"CDN (edge cache)","originalText":"CDN (edge cache)","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e24c6dfd5","type":"rectangle","x":1000,"y":250,"width":150,"height":60,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#e9ecef","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["std"],"frameId":null,"roundness":{"type":3},"seed":1647055768,"version":1,"versionNonce":100389471,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e4ef90130","type":"text","x":1042.0,"y":270.625,"width":66.0,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["std"],"frameId":null,"roundness":null,"seed":1358912275,"version":1,"versionNonce":1380322991,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Standard","originalText":"Standard","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e19619223","type":"rectangle","x":1000,"y":350,"width":150,"height":60,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#e9ecef","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["ia"],"frameId":null,"roundness":{"type":3},"seed":166369464,"version":1,"versionNonce":1287857265,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e12ded32d","type":"text","x":1004.875,"y":370.625,"width":140.25,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["ia"],"frameId":null,"roundness":null,"seed":712476974,"version":1,"versionNonce":545332599,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Infrequent access","originalText":"Infrequent access","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e53657a52","type":"rectangle","x":1000,"y":450,"width":150,"height":60,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#e9ecef","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["gl"],"frameId":null,"roundness":{"type":3},"seed":1596046910,"version":1,"versionNonce":1487963129,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e26f7240a","type":"text","x":1004.875,"y":470.625,"width":140.25,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["gl"],"frameId":null,"roundness":null,"seed":1333911086,"version":1,"versionNonce":1219258965,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Glacier (archive)","originalText":"Glacier (archive)","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e11149858","type":"text","x":1021.375,"y":220,"width":107.25000000000001,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":26777431,"version":1,"versionNonce":1035990566,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Lifecycle rules","originalText":"Lifecycle rules","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e7c3bd72","type":"text","x":1053.55,"y":536,"width":42.900000000000006,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1043243375,"version":1,"versionNonce":577185114,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"delete","originalText":"delete","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e7c7b2cd7","type":"arrow","x":150,"y":275,"width":180,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1443112403,"version":1,"versionNonce":213715570,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[180,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e58998620","type":"text","x":129.175,"y":232,"width":221.65,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":467493146,"version":1,"versionNonce":1451071152,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"① ask: upload URL for photo.jpg","originalText":"① ask: upload URL for photo.jpg","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e3eabae8c","type":"arrow","x":330,"y":305,"width":180,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":624609530,"version":1,"versionNonce":1522288719,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[-180,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e421dd775","type":"text","x":154.2,"y":314,"width":171.60000000000002,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":613200081,"version":1,"versionNonce":997855888,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"② pre-signed URL (5 min)","originalText":"② pre-signed URL (5 min)","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e3ba28866","type":"arrow","x":75,"y":330,"width":705,"height":70,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1001455707,"version":1,"versionNonce":1647484528,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[0,70],[705,70],[705,10]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"ef2b1a05","type":"text","x":247.67499999999998,"y":382,"width":364.65000000000003,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":2133096370,"version":1,"versionNonce":1919126527,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"③ PUT the bytes straight to S3 (multipart if large)","originalText":"③ PUT the bytes straight to S3 (multipart if large)","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e464823a0","type":"arrow","x":415,"y":330,"width":0,"height":100,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":427886183,"version":1,"versionNonce":669316237,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[0,100]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e7d333967","type":"text","x":425,"y":344,"width":200.20000000000002,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":184370611,"version":1,"versionNonce":2010590888,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"④ after upload: save the row","originalText":"④ after upload: save the row","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e3c8977a6","type":"arrow","x":780,"y":250,"width":0,"height":70,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":37590537,"version":1,"versionNonce":621887389,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[0,-70]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e3abf8e5e","type":"text","x":790,"y":204,"width":200.20000000000002,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":164205699,"version":1,"versionNonce":1760716882,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"⑤ first read fetches from S3","originalText":"⑤ first read fetches from S3","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e40d8e013","type":"arrow","x":75,"y":250,"width":605,"height":100,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":2078996627,"version":1,"versionNonce":2135906903,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[0,-100],[605,-100]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e39879bf9","type":"text","x":208.39999999999998,"y":130,"width":343.20000000000005,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":2134527796,"version":1,"versionNonce":576937035,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"⑥ downloads go via the CDN  (GET cdn…/photo.jpg)","originalText":"⑥ downloads go via the CDN  (GET cdn…/photo.jpg)","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e31843f2a","type":"arrow","x":880,"y":295,"width":120,"height":15,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":450621989,"version":1,"versionNonce":1968286391,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[120,-15]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e790900f3","type":"text","x":879.225,"y":260,"width":121.55000000000001,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1998310963,"version":1,"versionNonce":452493697,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"stored in a class","originalText":"stored in a class","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e98cea13","type":"arrow","x":1075,"y":310,"width":0,"height":40,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1248702408,"version":1,"versionNonce":193924423,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[0,40]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e12248efc","type":"text","x":1085,"y":318,"width":92.95,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1605214350,"version":1,"versionNonce":1125422555,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"after 30 days","originalText":"after 30 days","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2182f4c4","type":"arrow","x":1075,"y":410,"width":0,"height":40,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":2045994298,"version":1,"versionNonce":772135432,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[0,40]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e10f933f2","type":"text","x":1085,"y":418,"width":85.80000000000001,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1295718059,"version":1,"versionNonce":1761402624,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"after 1 year","originalText":"after 1 year","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e50da80ec","type":"arrow","x":1075,"y":510,"width":0,"height":22,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1092520183,"version":1,"versionNonce":600367477,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[0,22]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e7184b30d","type":"rectangle","x":0,"y":580,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note1"],"frameId":null,"roundness":{"type":3},"seed":241973217,"version":1,"versionNonce":1510404791,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e2ebe7f69","type":"text","x":10,"y":589,"width":207.35000000000002,"height":81.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note1"],"frameId":null,"roundness":null,"seed":496892512,"version":1,"versionNonce":1069206235,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"① Blob = any file as bytes\nImages, video, PDFs, backups.\nThe database keeps only a\nsmall row about each file,\nnever the bytes.","originalText":"① Blob = any file as bytes\nImages, video, PDFs, backups.\nThe database keeps only a\nsmall row about each file,\nnever the bytes.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e72e80527","type":"rectangle","x":225,"y":580,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note2"],"frameId":null,"roundness":{"type":3},"seed":1881507560,"version":1,"versionNonce":1043979109,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e32713b02","type":"text","x":235,"y":589,"width":214.50000000000003,"height":81.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note2"],"frameId":null,"roundness":null,"seed":53331483,"version":1,"versionNonce":341590074,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"② Not the server's disk\nServers must stay stateless. A\nfile on server 1 is invisible\nto server 2 and dies with that\ndisk.","originalText":"② Not the server's disk\nServers must stay stateless. A\nfile on server 1 is invisible\nto server 2 and dies with that\ndisk.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e75a709","type":"rectangle","x":450,"y":580,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note3"],"frameId":null,"roundness":{"type":3},"seed":2040022643,"version":1,"versionNonce":1055909349,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e573e4785","type":"text","x":460,"y":589,"width":207.35000000000002,"height":97.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note3"],"frameId":null,"roundness":null,"seed":968000375,"version":1,"versionNonce":870631389,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"③ Bucket + key\nBucket = top-level container.\nKey = the full name, like a\npath. Use a generated ID as\nthe key; the real file name\ngoes in the DB row.","originalText":"③ Bucket + key\nBucket = top-level container.\nKey = the full name, like a\npath. Use a generated ID as\nthe key; the real file name\ngoes in the DB row.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e26a654e4","type":"rectangle","x":675,"y":580,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note4"],"frameId":null,"roundness":{"type":3},"seed":1561613117,"version":1,"versionNonce":302166449,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e35456ce6","type":"text","x":685,"y":589,"width":207.35000000000002,"height":81.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note4"],"frameId":null,"roundness":null,"seed":738648790,"version":1,"versionNonce":807681803,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"④ Pre-signed URL\nA temporary link made by your\nAPI: one action, one key, a\nfew minutes. The bytes never\npass through the API.","originalText":"④ Pre-signed URL\nA temporary link made by your\nAPI: one action, one key, a\nfew minutes. The bytes never\npass through the API.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e28753ed4","type":"rectangle","x":900,"y":580,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note5"],"frameId":null,"roundness":{"type":3},"seed":259650851,"version":1,"versionNonce":1804382405,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e2a68d636","type":"text","x":910,"y":589,"width":207.35000000000002,"height":97.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note5"],"frameId":null,"roundness":null,"seed":3739587,"version":1,"versionNonce":696960627,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"⑤ Durable ≠ available\n11 nines durability (won't be\nlost) vs 99.99% availability\n(~53 min a year unreachable).\nReads are slow-ish → CDN in\nfront.","originalText":"⑤ Durable ≠ available\n11 nines durability (won't be\nlost) vs 99.99% availability\n(~53 min a year unreachable).\nReads are slow-ish → CDN in\nfront.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e60180d91","type":"rectangle","x":1125,"y":580,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note6"],"frameId":null,"roundness":{"type":3},"seed":726434940,"version":1,"versionNonce":1801976717,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e32fa2b56","type":"text","x":1135,"y":589,"width":193.05,"height":97.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note6"],"frameId":null,"roundness":null,"seed":257786827,"version":1,"versionNonce":2018379134,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"⑥ Lifecycle + versioning\nStandard → Infrequent →\nGlacier → delete. Colder =\ncheaper to keep, slower and\npricier to read. Versioning\nundoes mistakes.","originalText":"⑥ Lifecycle + versioning\nStandard → Infrequent →\nGlacier → delete. Colder =\ncheaper to keep, slower and\npricier to read. Versioning\nundoes mistakes.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true}]}</script>
+  </section>
+
+  <!-- 1 -->
+  <section id="blob" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">1</span>
+      <div>
+        <h2>What a blob is</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 0:00</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p><span class="term">Blob</span> stands for <strong>b</strong>inary <strong>l</strong>arge <strong>ob</strong>ject. In practice it means any file: a photo, a video, a PDF, even a text file. To a computer every file is just a long run of bytes.</p>
+      <p><span class="term">Blob storage</span> is a place that stores those bytes and hands them back when asked. It does not open the file or try to understand it. There is no required format, no schema (a fixed list of columns, like a database table has), and no rules about what is inside. Any bytes in, the same bytes out.</p>
+      <p>The most widely used blob storage in the world is <span class="term">S3</span>, a managed service from AWS. “Managed” means AWS runs the machines and you just call it. You will see S3 in almost every system design, so it is worth knowing what it does and why it exists.</p>
+    </div>
+    <div class="callout key">
+      <span class="cap">Key idea</span>
+      <p>A database understands your data: rows, columns, queries. Blob storage does not. It is a giant shelf where you put a box under a label and later ask for the box by that label.</p>
+    </div>
+  </section>
+
+  <!-- 2 -->
+  <section id="old" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">2</span>
+      <div>
+        <h2>The old way: files on the server’s own disk</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 1:12</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>S3 has not been around forever. To see why it was needed, look at how file uploads worked on the early internet.</p>
+      <p>Traffic was small, so one server did everything. That server had a hard disk attached, the same way your laptop has one. When a user uploaded a file, the server simply saved it on that disk.</p>
+    </div>
+
+    <figure>
+      <p class="cap">One server, one disk</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 34 760 136" role="img" aria-label="A user sends a file to the API server with an HTTP POST. The server saves it on the hard disk attached to it, at the path /home/app/www/static/a.txt.">
+          <path class="wire accent" d="M104 86H228" marker-end="url(#ah-accent)"/>
+          <text x="166" y="74" text-anchor="middle" class="t-mono t-accent">POST a.txt</text>
+          <path class="wire accent" d="M380 86H488" marker-end="url(#ah-accent)"/>
+          <text x="434" y="74" text-anchor="middle" class="t-mono t-accent">save</text>
+
+          <rect class="node" x="16" y="61" width="88" height="50" rx="10"/>
+          <text x="60" y="91" text-anchor="middle">User</text>
+          <rect class="node" x="230" y="53" width="150" height="66" rx="10"/>
+          <text x="305" y="91" text-anchor="middle">API server</text>
+
+          <path class="node main" d="M490 60v52a70 14 0 0 0 140 0v-52"/>
+          <ellipse class="node main" cx="560" cy="60" rx="70" ry="14"/>
+          <text x="560" y="102" text-anchor="middle" class="t-b">its hard disk</text>
+          <text x="560" y="158" text-anchor="middle" class="t-mono t-muted">/home/app/www/static/a.txt</text>
+        </svg>
+      </div>
+    </figure>
+
+    <div class="prose">
+      <h3>How the “static folder” worked <span class="ts">▶ 2:12</span></h3>
+      <p>The server exposed an <span class="term">endpoint</span> (a URL that accepts requests) for uploads. It also had one special folder on its disk, usually called the <span class="term">static folder</span>, at a fixed, hand-written location. If you have built a small web app you have probably seen a folder named <code>static</code>. This is its job.</p>
+      <p>Both directions are the same trick: glue the folder’s location and the file name together to get a full path on the disk.</p>
+    </div>
+<pre><code><span class="c"># the one folder on this server's disk that holds uploaded files</span>
+STATIC_DIR = "/home/app/www/static"
+
+<span class="c"># upload: the file arrives in the body of an HTTP POST request</span>
+POST /upload            (file name: a.txt)
+  path = STATIC_DIR + "/" + "a.txt"      <span class="c"># /home/app/www/static/a.txt</span>
+  write the request body to path
+
+<span class="c"># download: the user asks for /static/a.txt</span>
+GET /static/a.txt
+  path = STATIC_DIR + "/" + "a.txt"      <span class="c"># the same path again</span>
+  read the file at path and send it back</code></pre>
+    <div class="prose">
+      <p>That full path is the file’s identity. Image uploads, text file uploads, everything worked this way, and many small systems still do. It is also all you need to write your own static file server.</p>
+    </div>
+  </section>
+
+  <!-- 3 -->
+  <section id="breaks" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">3</span>
+      <div>
+        <h2>Why that breaks with more than one server</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 4:41</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>This worked well for a long time. It stops working the moment you add a second server, because <strong>each server has its own disk</strong>.</p>
+    </div>
+
+    <figure>
+      <p class="cap">Two servers, two disks, one missing file</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 232" role="img" aria-label="A user uploads a.txt. The load balancer sends the upload to server 1, which saves it on its own disk. Later the user asks for a.txt, the load balancer sends that request to server 2, whose disk does not have the file, so the user gets file not found.">
+          <text x="405" y="20" text-anchor="middle" class="t-accent">1 · the upload goes to server 1</text>
+
+          <path class="wire" d="M104 112H148" marker-end="url(#ah)"/>
+          <path class="wire accent" d="M270 112C306 112 304 57 338 57" marker-end="url(#ah-accent)"/>
+          <path class="wire red dash" d="M270 112C306 112 304 167 338 167" marker-end="url(#ah-red)"/>
+          <path class="wire accent" d="M470 57H548" marker-end="url(#ah-accent)"/>
+          <path class="wire red dash" d="M470 167H548" marker-end="url(#ah-red)"/>
+
+          <rect class="node" x="16" y="87" width="88" height="50" rx="10"/>
+          <text x="60" y="117" text-anchor="middle">User</text>
+          <rect class="node" x="150" y="87" width="120" height="50" rx="10"/>
+          <text x="210" y="117" text-anchor="middle">Load balancer</text>
+
+          <rect class="node" x="340" y="34" width="130" height="46" rx="10"/>
+          <text x="405" y="62" text-anchor="middle">Server 1</text>
+          <rect class="node" x="340" y="144" width="130" height="46" rx="10"/>
+          <text x="405" y="172" text-anchor="middle">Server 2</text>
+
+          <path class="node copy" d="M550 44v28a50 11 0 0 0 100 0v-28"/>
+          <ellipse class="node copy" cx="600" cy="44" rx="50" ry="11"/>
+          <text x="600" y="72" text-anchor="middle" class="t-teal">a.txt</text>
+          <text x="600" y="104" text-anchor="middle" class="t-mono t-muted">DISK 1</text>
+
+          <path class="node dead" d="M550 154v28a50 11 0 0 0 100 0v-28"/>
+          <ellipse class="node dead" cx="600" cy="154" rx="50" ry="11"/>
+          <text x="600" y="182" text-anchor="middle" class="t-muted">empty</text>
+          <text x="600" y="214" text-anchor="middle" class="t-mono t-muted">DISK 2</text>
+
+          <text x="405" y="216" text-anchor="middle" class="t-red">2 · the read goes to server 2</text>
+          <text x="708" y="172" text-anchor="middle" class="t-red">not found</text>
+        </svg>
+      </div>
+      <figcaption>A load balancer spreads requests across servers. It has no idea which server’s disk holds which file, so a read can easily land on a server that never saw the upload.</figcaption>
+    </figure>
+
+    <div class="prose">
+      <p>You could try to patch this. One patch is a <span class="term">sticky</span> load balancer: one that always sends the same user to the same server. But that only piles on problems. Other users still cannot see the file, the file dies with that one server, and a single disk can only grow so big.</p>
+      <p>The lesson’s point: do not go down that road. The disk itself is in the wrong place.</p>
+    </div>
+    <div class="callout key">
+      <span class="cap">The two real problems</span>
+      <p><strong>Routing:</strong> with files spread over many private disks, no request knows where to go. <strong>Size:</strong> the data keeps growing, and one machine’s disk does not.</p>
+    </div>
+  </section>
+
+  <!-- 4 -->
+  <section id="shared" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">4</span>
+      <div>
+        <h2>The fix: one shared store every server can reach</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 5:11</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>What you actually need is storage that is <strong>attached to the network instead of to one machine</strong>, and that <strong>never fills up</strong>. The lesson’s phrase is an “infinitely scalable, network-attached storage.” That is what S3 is, and that is what blob storage means in practice.</p>
+      <p>Now servers stop saving files on their own disks. They save them remotely, in S3.</p>
+    </div>
+
+    <figure>
+      <p class="cap">Every server talks to the same store</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 250" role="img" aria-label="Users reach a load balancer, which spreads requests over three API servers. All three API servers read and write files in the same S3 store, which holds a.txt and b.txt.">
+          <text x="405" y="18" text-anchor="middle" class="t-mono t-muted">STATELESS · ANY SERVER CAN ANSWER</text>
+          <text x="650" y="18" text-anchor="middle" class="t-mono t-muted">SHARED BY ALL</text>
+
+          <path class="wire" d="M104 132H148" marker-end="url(#ah)"/>
+          <path class="wire" d="M278 132C312 132 306 59 338 59" marker-end="url(#ah)"/>
+          <path class="wire" d="M278 132H338" marker-end="url(#ah)"/>
+          <path class="wire" d="M278 132C312 132 306 205 338 205" marker-end="url(#ah)"/>
+          <path class="wire teal" d="M470 59C522 59 516 112 558 116" marker-end="url(#ah-teal)"/>
+          <path class="wire teal" d="M470 132H558" marker-end="url(#ah-teal)"/>
+          <path class="wire teal" d="M470 205C522 205 516 152 558 148" marker-end="url(#ah-teal)"/>
+
+          <rect class="node" x="16" y="107" width="88" height="50" rx="10"/>
+          <text x="60" y="137" text-anchor="middle">Users</text>
+          <rect class="node" x="150" y="107" width="128" height="50" rx="10"/>
+          <text x="214" y="137" text-anchor="middle">Load balancer</text>
+
+          <rect class="node" x="340" y="36" width="130" height="46" rx="10"/>
+          <text x="405" y="64" text-anchor="middle">API server 1</text>
+          <rect class="node" x="340" y="109" width="130" height="46" rx="10"/>
+          <text x="405" y="137" text-anchor="middle">API server 2</text>
+          <rect class="node" x="340" y="182" width="130" height="46" rx="10"/>
+          <text x="405" y="210" text-anchor="middle">API server 3</text>
+
+          <rect class="node copy" x="560" y="66" width="180" height="132" rx="24"/>
+          <text x="650" y="102" text-anchor="middle" class="t-b">S3</text>
+          <text x="650" y="122" text-anchor="middle" class="t-muted">blob storage</text>
+          <rect class="node" x="586" y="144" width="60" height="28" rx="6"/>
+          <text x="616" y="163" text-anchor="middle" class="t-mono">a.txt</text>
+          <rect class="node" x="654" y="144" width="60" height="28" rx="6"/>
+          <text x="684" y="163" text-anchor="middle" class="t-mono">b.txt</text>
+        </svg>
+      </div>
+      <figcaption>Any file that needs to be reachable by any server is stored in one place that all of them can reach.</figcaption>
+    </figure>
+
+    <div class="prose">
+      <h3>The upload path now</h3>
+      <ol>
+        <li>The user uploads a file. The request reaches the load balancer.</li>
+        <li>The load balancer forwards it to any API server.</li>
+        <li>That API server stores the file in S3 and waits for S3 to confirm.</li>
+        <li>The API server tells the user “saved.”</li>
+      </ol>
+      <p>Reading works from any server too. Whichever one gets the request asks S3 for the file and passes it back to the user.</p>
+    </div>
+    <div class="callout key">
+      <span class="cap">Why this matters</span>
+      <p>The API servers are <span class="term">stateless</span> again: they hold no data of their own, so any of them can handle any request, and you can add or remove servers freely. All the “remembered” data lives in one shared place.</p>
+    </div>
+    <div class="prose">
+      <p>S3 offers a small set of simple operations — store a file, get a file, delete a file — so you do not have to build any of this yourself. It has become the default answer: if you are saving a binary file, it goes to S3.</p>
+    </div>
+  </section>
+
+  <!-- 5 -->
+  <section id="keys" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">5</span>
+      <div>
+        <h2>Buckets and keys</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 6:50</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>S3 has two names you need to know.</p>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <span class="k">Bucket</span>
+        <h3>A named container for files</h3>
+        <p>You create a bucket before you can store anything. Think of it as a <span class="term">namespace</span>: a label that keeps your files apart from everyone else’s.</p>
+        <p>The name must be unique across the whole world. If someone already took <code>todo-app</code>, you pick another name. Examples: <code>insta-images</code>, <code>my-bucket</code>.</p>
+      </div>
+      <div class="card teal">
+        <span class="k">Key</span>
+        <h3>The file’s name inside the bucket</h3>
+        <p>A key looks like a folder path, for example <code>user123/72896.png</code>. It is the label you store a file under and ask for it by.</p>
+        <p>Inside, S3 stores things differently from real folders. You do not need to care: to you a key is just a path.</p>
+      </div>
+    </div>
+
+    <div class="addr" role="img" aria-label="The address s3://insta-images/user123/72896.png. insta-images is the bucket. user123/72896.png is the key.">
+      <span class="seg plain"><b>s3://</b></span>
+      <span class="seg bucket"><b>insta-images</b><small>bucket</small></span>
+      <span class="seg plain"><b>/</b></span>
+      <span class="seg key"><b>user123/72896.png</b><small>key</small></span>
+    </div>
+
+    <div class="prose">
+      <p><strong>The lesson’s example.</strong> You are building Instagram. User <code>123</code> uploads an image named <code>72896.png</code>. Your API server receives the image over HTTP, then makes one S3 call: store these bytes in bucket <code>insta-images</code> under key <code>user123/72896.png</code>.</p>
+      <p>It is the same idea as the static folder. Back then you built a path on the local disk. Now you build a path (the key) in S3. The call is made with the <span class="term">AWS SDK</span>, a code library AWS gives you for talking to its services.</p>
+
+      <h3>What you can do with a file <span class="ts">▶ 8:27</span></h3>
+      <ul>
+        <li><strong>Create</strong> a file.</li>
+        <li><strong>Replace</strong> a file with a new one.</li>
+        <li><strong>Delete</strong> a file.</li>
+        <li><strong>Read</strong> the whole file in one go, or read just a segment of it.</li>
+      </ul>
+      <p>That list is short on purpose. Notice what is missing: there is no “open the file and change the middle of it.” This is why the lesson says S3 is not a full-fledged file system. Section 7.2 explains what that costs you.</p>
+
+      <h3>Who can read your files <span class="ts">▶ 9:16</span></h3>
+      <p>S3 has security policies. Nobody else can read your files unless you give them access, and you cannot read another customer’s files unless they give access to you.</p>
+    </div>
+  </section>
+
+  <!-- 6 -->
+  <section id="tradeoffs" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">6</span>
+      <div>
+        <h2>Strengths, weaknesses, and when to use it</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 8:40</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>Most teams treat S3 as a black box: put files in, get files out, pay for what you store and how often you access it. Here is what you get and what you give up.</p>
+    </div>
+    <div class="grid-2">
+      <div class="card teal">
+        <span class="k">Advantages</span>
+        <ul>
+          <li><strong>Cheap and durable.</strong> Storage costs little, and S3 keeps several copies of every file so it does not get lost. (<span class="term">Durable</span> = your data survives.)</li>
+          <li><strong>Stores literally any file.</strong> Images, video, audio, text, database backups, CSV exports.</li>
+          <li><strong>Scalable and available.</strong> It never fills up, it handles many requests at once, and it is almost always reachable.</li>
+          <li><strong>Plugs into everything.</strong> Other AWS services, and big-data tools such as Apache Spark and Kafka, can read from and write to S3 directly.</li>
+        </ul>
+      </div>
+      <div class="card red">
+        <span class="k">Disadvantages</span>
+        <ul>
+          <li><strong>Reads are slow.</strong> A disk (SSD or HDD) attached straight to your machine is much, much faster. If you need very quick reads, do not use S3; use the local disk.</li>
+          <li><strong>Not a full-fledged file system.</strong> You cannot use the normal “open, read, write” file commands of your operating system. You must go through the AWS SDK or S3’s API calls.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout warn">
+      <span class="cap">A number to double-check</span>
+      <p>Around 10:02 the lesson quotes a figure with a long row of nines and calls it availability. The famous S3 number is about <em>durability</em>, not availability. Section 7.1 gives both numbers and the difference.</p>
+    </div>
+
+    <div class="prose">
+      <h3>Why big-data tools love it <span class="ts">▶ 10:11</span></h3>
+      <p>Big-data work means processing huge amounts of data. That data has to sit somewhere that never runs out of space. S3 is exactly that, so nearly every big-data tool can read, write and crunch data in S3 without extra plumbing. This is a large part of why “S3” and “blob storage” are used almost as the same word.</p>
+
+      <h3>When to use S3 <span class="ts">▶ 11:57</span></h3>
+      <p>Use it when you want to store a blob that needs to be reachable from one central place. The lesson lists five common uses:</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>Use</th><th>Why S3 fits</th></tr></thead>
+        <tbody>
+          <tr><th>Database backups</th><td>Large files, written once, rarely read, must not be lost</td></tr>
+          <tr><th>Log archives</th><td>Old logs pile up forever and are almost never opened</td></tr>
+          <tr><th>Static website hosting</th><td>HTML, CSS, JavaScript and images are just files to hand out</td></tr>
+          <tr><th>Big-data storage</th><td>Needs unlimited space, and the tools already speak S3</td></tr>
+          <tr><th>A dumping ground for rarely used data</th><td>Cheap to keep around “just in case”</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>The “why” column is a short reading of the lesson’s list, not a quote.</p>
+      <h3>It is not only S3 <span class="ts">▶ 14:46</span></h3>
+      <p>Google Cloud Storage and Azure’s blob storage are very similar. If you understand S3, you understand them. If you are not on a cloud at all, the lesson points to HDFS (the storage layer of the Hadoop big-data system) as the equivalent you run yourself.</p>
+    </div>
+  </section>
+
+  <!-- 7 -->
+  <section id="deeper" class="extra">
+    <div class="sec-head">
+      <span class="sec-num">7</span>
+      <div>
+        <h2>Going deeper</h2>
+        <div class="sec-meta"><span class="badge">Extra depth · not in the video</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson stops at section 6. These are the follow-up questions an interviewer is likely to ask next.</p>
+
+      <h3>7.1 · Durable and available are two different promises</h3>
+      <ul>
+        <li><strong><span class="term">Durability</span>: will my file still exist?</strong> S3’s standard class is designed for 99.999999999% durability — eleven nines. AWS’s own illustration: store ten million files and you should expect to lose one about every ten thousand years.</li>
+        <li><strong><span class="term">Availability</span>: can I reach my file right now?</strong> The standard class is designed for 99.99%. That allows roughly 53 minutes a year when requests may fail.</li>
+      </ul>
+      <p>So a file can be perfectly safe and still be unreachable for a few minutes. Losing data and being unable to reach it for a moment are very different failures, which is why they get separate numbers.</p>
+      <p><strong>How does it get eleven nines?</strong> Each file is spread across many disks in at least three separate data centres (AWS calls them availability zones). S3 keeps checking the stored pieces for damage and quietly repairs them from the healthy ones. To lose a file, many disks in different buildings would have to fail at almost the same time.</p>
+
+      <h3>7.2 · Three kinds of storage, and why S3 is “not a file system”</h3>
+      <p>Cloud storage comes in three shapes. They are easy to mix up, and interviewers like to check that you can tell them apart.</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th></th><th>Block storage</th><th>File storage</th><th>Object (blob) storage</th></tr></thead>
+        <tbody>
+          <tr><th>What it is</th><td>A raw disk attached to one machine</td><td>A shared folder tree over the network</td><td>A flat list of label → file</td></tr>
+          <tr><th>AWS name</th><td>EBS</td><td>EFS</td><td>S3</td></tr>
+          <tr><th>Who can use it at once</th><td>Normally one machine</td><td>Many machines</td><td>Anything that can make a web request</td></tr>
+          <tr><th>Change the middle of a file?</th><td><span class="good">Yes</span></td><td><span class="good">Yes</span></td><td><span class="bad">No</span> — you upload the whole file again</td></tr>
+          <tr><th>Speed</th><td>Fastest</td><td>Medium</td><td>Slowest per request</td></tr>
+          <tr><th>Size limit</th><td>You pick a size up front</td><td>Grows as needed</td><td>Effectively none</td></tr>
+          <tr><th>Typical use</th><td>A database’s own disk</td><td>Files several servers must edit</td><td>Photos, videos, backups, logs</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>Concretely, “not a file system” means:</p>
+      <ul>
+        <li><strong>No editing in place.</strong> To change one byte of a 1 GB file, you upload 1 GB again. There is no “append a line to the end” either.</li>
+        <li><strong>No real folders.</strong> A key such as <code>user123/72896.png</code> is one long name that happens to contain a slash. “List the folder <code>user123/</code>” really means “list every key that starts with <code>user123/</code>.”</li>
+        <li><strong>No rename.</strong> Renaming is done as copy to the new key, then delete the old one.</li>
+      </ul>
+      <p>Giving up these features is the trade that buys unlimited size. A simple “label → whole file” model is far easier to spread over thousands of machines than a tree of folders that many programs are editing at once.</p>
+
+      <h3>7.3 · Why reads are slow, and what to do about it</h3>
+      <p>Every S3 read is a web request that travels over the network to another machine. It typically takes tens to a few hundred milliseconds before the first byte comes back. A read from a disk attached to your own machine takes well under a millisecond.</p>
+      <p>Once a download has started, S3 moves bytes quickly. So it is fine for big files and bad for workloads that make thousands of tiny reads and need each one instantly. That is why a database keeps its data on an attached disk, not in S3.</p>
+      <p>For files shown to users, the fix is a <span class="term">CDN</span> (content delivery network): a fleet of servers around the world that keep copies of your files close to users. The first request for a photo goes to S3. After that the CDN answers from its nearby copy, and S3 is not involved.</p>
+
+      <h3>7.4 · Do not push the file through your API server</h3>
+      <p>In the lesson the file travels user → API server → S3. That is the simplest picture, but for large files it wastes your servers: a 2 GB video ties up one server’s network and memory for minutes, just to pass bytes along.</p>
+      <p>The standard fix is a <span class="term">pre-signed URL</span>. This is a temporary web address created by your server that allows one specific action (say, “upload to this exact key”) for a few minutes. Whoever holds the address can do that one thing and nothing else, with no AWS password needed.</p>
+    </div>
+
+    <figure>
+      <p class="cap">Uploading straight to S3 with a pre-signed URL</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 262" role="img" aria-label="Step 1: the client tells the API server it wants to upload cat.png. Step 2: the API server replies with a signed URL that is valid for five minutes. Step 3: the client sends the file bytes straight to S3, skipping the API server. Step 4: S3 sends an event to the API server saying the file arrived, and the API server marks it ready.">
+          <path class="lane" d="M110 48V252"/>
+          <path class="lane" d="M380 48V252"/>
+          <path class="lane" d="M650 48V252"/>
+
+          <rect class="node" x="40" y="10" width="140" height="38" rx="9"/>
+          <text x="110" y="34" text-anchor="middle">Client</text>
+          <rect class="node" x="310" y="10" width="140" height="38" rx="9"/>
+          <text x="380" y="34" text-anchor="middle">API server</text>
+          <rect class="node copy" x="580" y="10" width="140" height="38" rx="9"/>
+          <text x="650" y="34" text-anchor="middle" class="t-b">S3</text>
+
+          <text x="245" y="80" text-anchor="middle">1 · I want to upload cat.png</text>
+          <path class="wire" d="M112 90H376" marker-end="url(#ah)"/>
+
+          <text x="245" y="124" text-anchor="middle">2 · here is a signed URL, valid 5 min</text>
+          <path class="wire" d="M378 134H114" marker-end="url(#ah)"/>
+
+          <text x="245" y="172" text-anchor="middle" class="t-teal">3 · the file bytes go straight to S3</text>
+          <text x="515" y="172" text-anchor="middle" class="t-muted">API server is skipped</text>
+          <path class="wire teal thick" d="M112 184H644" marker-end="url(#ah-teal-sm)"/>
+
+          <text x="515" y="222" text-anchor="middle">4 · “file arrived” → mark it ready</text>
+          <path class="wire" d="M648 232H384" marker-end="url(#ah)"/>
+        </svg>
+      </div>
+      <figcaption>Your API server only handles two tiny messages. The heavy bytes never touch it. Downloads work the same way: hand out a short-lived signed link, or serve through a CDN.</figcaption>
+    </figure>
+
+    <div class="prose">
+      <h3>7.5 · The file goes in S3; the facts about the file go in a database</h3>
+      <p>S3 can fetch a file by its key, but it cannot answer questions like “show me all photos by user 123, newest first.” So you keep two things:</p>
+      <ul>
+        <li><strong>In S3:</strong> the bytes.</li>
+        <li><strong>In a database row:</strong> the facts about the file (its <span class="term">metadata</span>) — who owns it, its size, its type, when it was uploaded, whether the upload finished — plus the S3 key that points to the bytes.</li>
+      </ul>
+      <p><strong>Why not put the file itself in the database?</strong> A database is built for small rows that are searched and updated. Storing videos in it makes the database huge, makes backups and replicas slow, and uses its expensive fast disks for bytes that nobody ever queries.</p>
+
+      <h3>7.6 · Choosing keys</h3>
+      <ul>
+        <li><strong>Never use the user’s file name as the key.</strong> Two users will both upload <code>photo.jpg</code>, and the second upload silently replaces the first. Generate a unique ID for each file and keep the original name in the database.</li>
+        <li><strong>Start keys with what you list by.</strong> You can only list by the beginning of a key. <code>user123/…</code> makes “all files for user 123” cheap.</li>
+        <li><strong>Never build a disk path from user input.</strong> In the static-folder approach from section 2, a file name such as <code>../../etc/passwd</code> can make the server read or overwrite files outside the folder. This attack is called <span class="term">path traversal</span>.</li>
+      </ul>
+      <p>S3 scales its speed by key prefix: each prefix can take at least 3,500 writes and 5,500 reads per second, and S3 adds capacity on its own as traffic grows.</p>
+
+      <h3>7.7 · Big files: upload in parts, read in ranges</h3>
+      <p>The lesson’s exercise asks how you would upload huge files and read a fragment of a file. These are the two answers.</p>
+      <ul>
+        <li><strong><span class="term">Multipart upload</span>.</strong> Cut the file into parts, upload the parts side by side, and S3 joins them at the end. If one part fails you resend only that part, not the whole file. A single plain upload is capped at 5 GB, so anything larger must use this. Each part is at least 5 MB (the last one can be smaller) and there can be up to 10,000 parts.</li>
+        <li><strong>Range read.</strong> Ask for “bytes 1,000,000 to 2,000,000 only.” This is how a video player jumps to the middle of a film without downloading the start, and how a broken download resumes where it stopped.</li>
+      </ul>
+
+      <h3>7.8 · Is a file readable the moment it is written?</h3>
+      <p>Yes. Since December 2020, S3 gives <span class="term">strong consistency</span>: once an upload succeeds, the very next read or listing sees the new file. Older articles say S3 could briefly return the old version. That is no longer true.</p>
+
+      <h3>7.9 · Keeping the bill and the mistakes under control</h3>
+      <ul>
+        <li><strong>What you pay for.</strong> Three things: how much you store (roughly $0.023 per GB per month for the standard class in US regions), how many requests you make, and data sent out to the internet. That last one surprises people on apps that serve a lot of video.</li>
+        <li><strong><span class="term">Storage classes</span>.</strong> Colder classes (Infrequent Access, then the Glacier archive classes) cost less to keep, but charge a fee per read, and the deepest archives take minutes to hours to bring a file back. They fit the lesson’s “rarely used data” and “log archive” cases.</li>
+        <li><strong><span class="term">Lifecycle rules</span>.</strong> Instructions such as “after 30 days move to a colder class; after a year delete.” S3 applies them for you.</li>
+        <li><strong><span class="term">Versioning</span>.</strong> When switched on, replacing or deleting a file keeps the old version, so a mistake can be undone.</li>
+      </ul>
+
+      <h3>7.10 · Security today</h3>
+      <p>The lesson asks you to read about <span class="term">ACLs</span> (access control lists: per-file lists of who may do what). Useful background, but note how things stand now:</p>
+      <ul>
+        <li>New buckets are <strong>private by default</strong>, with a safety switch called Block Public Access turned on.</li>
+        <li>AWS now recommends leaving ACLs <strong>switched off</strong> and controlling access with <span class="term">policies</span> instead: written rules attached to a bucket or to a user that say who may do what.</li>
+        <li>Files are <strong>encrypted on disk</strong> automatically.</li>
+        <li>To let one user see one private file, do not make it public. Hand them a short-lived pre-signed URL (7.4).</li>
+      </ul>
+
+      <h3>7.11 · Outside AWS</h3>
+      <p>S3’s way of talking has become a shared standard. Other products accept the same calls, such as Cloudflare R2, or MinIO if you want to run blob storage on your own machines. Code written for S3 usually works with them after changing an address.</p>
+    </div>
+  </section>
+
+  <!-- 8 -->
+  <section id="lab" class="lab">
+    <div class="sec-head">
+      <span class="sec-num">8</span>
+      <div>
+        <h2>Hands-on lab</h2>
+        <div class="sec-meta"><span class="badge">Exercise from the video</span><span class="ts">▶ 13:28 · commands added here</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson ends with three tasks: read the S3 documentation and explore its API, read about ACLs, and, if you can, play with the API yourself. A free-tier AWS account is enough.</p>
+      <p>Here is one way to do the “play with it” part from a terminal. It uses the AWS command-line tool (<code>aws</code>), installed and logged in to your account. Replace <code>YOUR-BUCKET</code> with a name nobody else in the world has used. Allow about 15 minutes.</p>
+    </div>
+
+    <ol class="step-list">
+      <li>
+        <b>Create a bucket</b>
+        <p>If the name is taken you get an error. That is the “unique across the world” rule from section 5.</p>
+<pre><code>aws s3 mb s3://YOUR-BUCKET</code></pre>
+      </li>
+      <li>
+        <b>Create a file under a key</b>
+        <p>Everything after the bucket name is the key. No folder is created; <code>user123/a.txt</code> is one name.</p>
+<pre><code>echo "hello blob storage" &gt; a.txt
+aws s3 cp a.txt s3://YOUR-BUCKET/user123/a.txt</code></pre>
+      </li>
+      <li>
+        <b>List by prefix, then read the whole file</b>
+        <p>The first command lists every key that starts with <code>user123/</code>. The second prints the file to your screen.</p>
+<pre><code>aws s3 ls s3://YOUR-BUCKET/user123/
+aws s3 cp s3://YOUR-BUCKET/user123/a.txt -</code></pre>
+      </li>
+      <li>
+        <b>Read only a segment</b>
+        <p>Ask for bytes 0 to 4. The file <code>part.txt</code> will contain just <code>hello</code>. This is the range read from section 7.7.</p>
+<pre><code>aws s3api get-object --bucket YOUR-BUCKET --key user123/a.txt \
+  --range bytes=0-4 part.txt
+cat part.txt</code></pre>
+      </li>
+      <li>
+        <b>Replace the file</b>
+        <p>Upload to the same key again. The old content is gone; there is no “edit.”</p>
+<pre><code>echo "second version" &gt; a.txt
+aws s3 cp a.txt s3://YOUR-BUCKET/user123/a.txt
+aws s3 cp s3://YOUR-BUCKET/user123/a.txt -</code></pre>
+      </li>
+      <li>
+        <b>See that it is private, then share it for five minutes</b>
+        <p>The first command shows the Block Public Access switches. The second prints a pre-signed URL. Open it in a browser: it works. Remove everything after the <code>?</code> and try again: access denied.</p>
+<pre><code>aws s3api get-public-access-block --bucket YOUR-BUCKET
+aws s3 presign s3://YOUR-BUCKET/user123/a.txt --expires-in 300</code></pre>
+      </li>
+      <li>
+        <b>Delete the file and the bucket</b>
+        <p>A bucket must be empty before it can be removed.</p>
+<pre><code>aws s3 rm s3://YOUR-BUCKET/user123/a.txt
+aws s3 rb s3://YOUR-BUCKET</code></pre>
+      </li>
+    </ol>
+
+    <div class="callout key">
+      <span class="cap">Try next</span>
+      <p>Upload a file of a few hundred MB with <code>aws s3 cp</code> and watch it: the tool switches to multipart upload on its own. Then find these in the docs, as the lesson asks: what the API calls <code>PutObject</code>, <code>GetObject</code> and <code>DeleteObject</code> take and return, and how ACLs differ from bucket policies.</p>
+    </div>
+  </section>
+
+  <!-- 9 -->
+  <section id="interview" class="extra">
+    <div class="sec-head">
+      <span class="sec-num">9</span>
+      <div>
+        <h2>In the interview</h2>
+        <div class="sec-meta"><span class="badge">Extra depth · not in the video</span></div>
+      </div>
+    </div>
+    <div class="callout say">
+      <span class="cap">What to say when the design has file uploads</span>
+      <p>“Files go to blob storage like S3, not to the database and not to the API servers’ disks, so the servers stay stateless. The database keeps one row per file with its owner, size, status and S3 key. For uploads, the client asks my API for a pre-signed URL and sends the bytes straight to S3, in parts if the file is large. For downloads I put a CDN in front, because S3 reads are slow and users are far away. Buckets stay private; access is through short-lived signed links.”</p>
+    </div>
+    <div class="prose"><p>Likely follow-ups. Answer each out loud before opening it.</p></div>
+
+    <details class="qa">
+      <summary>Why not just save uploads on the API server’s disk?</summary>
+      <div class="a">
+        <p>With more than one server, the file is on one server’s disk and the next request may hit another. The file is also lost if that server dies, and one disk cannot grow forever.</p>
+        <p>Putting files in a shared store keeps the servers stateless, so any server can handle any request and servers can be added or removed freely.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Why not store the images in the database?</summary>
+      <div class="a">
+        <p>Databases are built for small rows that get searched and updated. Large files bloat the database, slow down its backups and replicas, and sit on expensive fast disks for no benefit.</p>
+        <p>Store the bytes in blob storage and keep only a small row with the facts about the file and its key.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>A user uploads a 2 GB video on a shaky mobile connection. How?</summary>
+      <div class="a">
+        <p>The client gets pre-signed URLs from the API and uploads directly to S3 using multipart upload. The file is cut into parts sent side by side.</p>
+        <p>If the connection drops, only the unfinished parts are resent. The API server never carries the video itself.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>S3 reads are slow. How do you show images quickly?</summary>
+      <div class="a">
+        <p>Put a CDN in front of the bucket. The first request for an image is fetched from S3; after that, a copy near the user answers, which is much faster.</p>
+        <p>For data the servers themselves read constantly, keep a copy in a cache or on local disk and treat S3 as the long-term home.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>How do you keep one user’s private files away from another user?</summary>
+      <div class="a">
+        <p>The bucket is private; nothing in it has a public address. When a user asks for a file, the API first checks in the database that this user owns it.</p>
+        <p>Only then does it create a pre-signed URL for that one key, valid for a few minutes. A leaked link stops working quickly and opens nothing else.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Two users both upload “photo.jpg”. What happens?</summary>
+      <div class="a">
+        <p>If the key is built from the file name, the second upload silently replaces the first.</p>
+        <p>So the key is a unique ID the server generates, and the original file name is stored in the database row. Turning on versioning adds a safety net against accidental overwrites.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>What is the difference between durability and availability?</summary>
+      <div class="a">
+        <p>Durability is the chance the file still exists. Availability is the chance you can reach it right now.</p>
+        <p>S3’s standard class is designed for eleven nines of durability but 99.99% availability. A file can be completely safe and still be unreachable for a few minutes.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Five years of logs are costing too much to store. What do you do?</summary>
+      <div class="a">
+        <p>Add lifecycle rules: after a month move logs to an infrequent-access class, after a few months to an archive class, and delete them when the retention period ends.</p>
+        <p>The trade-off: archived files are cheaper to keep but slower and more expensive to read back, so this only suits data you rarely open.</p>
+      </div>
+    </details>
+  </section>
+
+  <nav class="lesson-nav" aria-label="Lessons">
+    <a href="21-client-server-protocols.html"><span>← Lesson 21</span>Client-server model &amp; Communication protocols</a>
+  </nav>
+
+  <footer>
+    <p>Notes on lesson 22, “Blob Storage &amp; S3” (15 min 31 s). Blue sections follow the video. Amber sections add depth beyond it. The lab commands use the AWS command-line tool and need an AWS account.</p>
+  </footer>
+
+</div>
+
+<script>
+  (function(){
+    var themeBtn = document.getElementById("themeBtn");
+    if (themeBtn) themeBtn.addEventListener("click", function(){
+      var root = document.documentElement;
+      var isDark = root.getAttribute("data-theme") === "dark"
+        || (!root.getAttribute("data-theme") && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+      root.setAttribute("data-theme", isDark ? "light" : "dark");
+    });
+  })();
+</script>
+<script src="../js/vendor/rough.js"></script>
+<script src="../js/sketch.js"></script>
+</body>
+</html>

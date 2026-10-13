@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data Redundancy &amp; Recovery — notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Patrick+Hand&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../css/notes.css">
+</head>
+<body>
+
+<!-- arrowheads shared by every diagram on the page -->
+<svg class="dia" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head teal" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head red" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head accent" d="M0 0L10 5L0 10z"/></marker>
+  </defs>
+</svg>
+
+<div class="wrap">
+
+  <header class="hero">
+    <div class="topbar">
+      <p class="eyebrow">Lesson 19 · Resiliency · Notes</p>
+      <div class="topbar-right">
+        <a class="back" href="../index.html">← Learning plan</a>
+        <button class="toggle" id="themeBtn" type="button">◐ Theme</button>
+      </div>
+    </div>
+    <h1>Data Redundancy &amp; Recovery</h1>
+    <p class="lede">Servers are easy to replace. Data is not. These notes cover what the lesson says about keeping extra copies of your data, then go deeper on the parts an interviewer will push on.</p>
+    <div class="chips">
+      <span class="chip"><b>8 min 34 s</b> video</span>
+      <span class="chip"><b>Blue</b> sections · from the video</span>
+      <span class="chip"><b style="color:var(--amber)">Amber</b> sections · extra depth</span>
+    </div>
+  </header>
+
+  <div class="tldr">
+    <h2>The whole lesson in five lines</h2>
+    <ol>
+      <li>API servers hold no data, so losing one is harmless. The database holds all the data, so losing it stops everything.</li>
+      <li>The only protection against losing data is to keep more than one copy of it. That is all “redundancy” means.</li>
+      <li><strong>Backup and restore:</strong> copy the data on a schedule — the changes daily, everything weekly — and keep one copy in another region. Cheap, but you lose whatever was written after the last backup.</li>
+      <li><strong>Continuous redundancy:</strong> run a second database (a replica) that receives every write as it happens. If the main one dies, the replica takes over almost at once.</li>
+      <li>Critical data gets a live replica. Less critical data gets periodic backups.</li>
+    </ol>
+  </div>
+
+  <ul class="toc" aria-label="Contents">
+    <li><a href="#sketch"><b>✎</b>The picture to draw</a></li>
+    <li><a href="#why"><b>1</b>Why the database is the hard part</a></li>
+    <li><a href="#copies"><b>2</b>The one idea: more copies</a></li>
+    <li><a href="#backup"><b>3</b>Backup and restore</a></li>
+    <li><a href="#replica"><b>4</b>Continuous redundancy</a></li>
+    <li><a href="#pick"><b>5</b>Picking between them</a></li>
+    <li><a href="#deeper"><b>6</b>Going deeper</a></li>
+    <li><a href="#lab"><b>7</b>Hands-on lab</a></li>
+    <li><a href="#interview"><b>8</b>In the interview</a></li>
+  </ul>
+
+  <section id="sketch" class="sketch-sec">
+    <div class="sec-head">
+      <span class="sec-num">✎</span>
+      <div>
+        <h2>The picture to draw</h2>
+        <div class="sec-meta"><span class="badge">Sketch · editable in Excalidraw</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>One picture holds the whole lesson: stateless servers on the left that anyone can replace, and on the right the database with its three protections — a live replica, backup files, and a copy in another region. Draw it when the interviewer says “how do you make sure we never lose data?”</p>
+    </div>
+    <div class="paper"><button class="zoom-btn" type="button" data-zoom>⤢ Full size</button><div class="paper-scroll"><svg class="sketch" data-sketch="sk" role="img" aria-label="Users reach API servers through a load balancer. The servers write to a main database, which replicates to a standby replica and is dumped nightly to backup files; backups are copied weekly to another region. Notes explain each part."></svg></div></div>
+    <p class="paper-foot"><span class="cap">Sketch · lesson 19</span><span><a class="btn ghost" href="../diagrams/19-data-redundancy-recovery.excalidraw" download>Download for Excalidraw</a> &nbsp; open it at excalidraw.com → menu → Open</span></p>
+    <script type="application/json" id="sk" data-sketch-src="diagrams/19-data-redundancy-recovery.excalidraw">{"elements":[{"id":"ea4f12ce","type":"text","x":0,"y":0,"width":585.2,"height":35.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":473439233,"version":1,"versionNonce":219380805,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Lesson 19 · Data redundancy & recovery","originalText":"Lesson 19 · Data redundancy & recovery","fontSize":28,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e1d0948bf","type":"text","x":0,"y":42,"width":924.0000000000001,"height":20.0,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1009489084,"version":1,"versionNonce":422423279,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Stateless servers are replaceable. The database is the one copy of the truth — so make more copies of it.","originalText":"Stateless servers are replaceable. The database is the one copy of the truth — so make more copies of it.","fontSize":16,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2b3afb57","type":"rectangle","x":0,"y":250,"width":130,"height":70,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["users"],"frameId":null,"roundness":{"type":3},"seed":438888458,"version":1,"versionNonce":1036490075,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e4fe16851","type":"text","x":44.375,"y":275.625,"width":41.25,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["users"],"frameId":null,"roundness":null,"seed":2115806099,"version":1,"versionNonce":1933397435,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Users","originalText":"Users","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4e1d11e7","type":"rectangle","x":200,"y":250,"width":150,"height":70,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#e9ecef","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["lb"],"frameId":null,"roundness":{"type":3},"seed":1804821558,"version":1,"versionNonce":4098075,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e3d5f629d","type":"text","x":221.375,"y":275.625,"width":107.25000000000001,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["lb"],"frameId":null,"roundness":null,"seed":1952490402,"version":1,"versionNonce":1402259677,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Load balancer","originalText":"Load balancer","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2c086b08","type":"rectangle","x":430,"y":160,"width":160,"height":50,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["api1"],"frameId":null,"roundness":{"type":3},"seed":1717221869,"version":1,"versionNonce":1381117824,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"eada0576","type":"text","x":460.5,"y":175.625,"width":99.00000000000001,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["api1"],"frameId":null,"roundness":null,"seed":1792394663,"version":1,"versionNonce":1418596893,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"API server 1","originalText":"API server 1","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"ef590085","type":"rectangle","x":430,"y":260,"width":160,"height":50,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":["api2"],"frameId":null,"roundness":{"type":3},"seed":1953731525,"version":1,"versionNonce":834374148,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e64228039","type":"text","x":452.25,"y":275.625,"width":115.50000000000001,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["api2"],"frameId":null,"roundness":null,"seed":1527919545,"version":1,"versionNonce":1610914378,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"API server 2 ✕","originalText":"API server 2 ✕","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e19834c51","type":"rectangle","x":430,"y":360,"width":160,"height":50,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["api3"],"frameId":null,"roundness":{"type":3},"seed":1026567497,"version":1,"versionNonce":1909136608,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e16d9ccc0","type":"text","x":460.5,"y":375.625,"width":99.00000000000001,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["api3"],"frameId":null,"roundness":null,"seed":931846999,"version":1,"versionNonce":1694655440,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"API server 3","originalText":"API server 3","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e51634723","type":"rectangle","x":720,"y":250,"width":170,"height":80,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#b2f2bb","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["db"],"frameId":null,"roundness":{"type":3},"seed":714075261,"version":1,"versionNonce":186293890,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e668162f1","type":"text","x":772.0,"y":271.25,"width":66.0,"height":37.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["db"],"frameId":null,"roundness":null,"seed":2031874606,"version":1,"versionNonce":2086618137,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Database\n(main)","originalText":"Database\n(main)","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e5c64c0be","type":"rectangle","x":980,"y":250,"width":170,"height":80,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#b2f2bb","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":["rep"],"frameId":null,"roundness":{"type":3},"seed":850056704,"version":1,"versionNonce":994629688,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e3360a4a8","type":"text","x":1003.125,"y":271.25,"width":123.75000000000001,"height":37.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["rep"],"frameId":null,"roundness":null,"seed":1596337780,"version":1,"versionNonce":2033231095,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Standby replica\n(live copy)","originalText":"Standby replica\n(live copy)","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"eadea248","type":"rectangle","x":720,"y":430,"width":170,"height":90,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bak"],"frameId":null,"roundness":{"type":3},"seed":1556493282,"version":1,"versionNonce":341140777,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e15c2ae10","type":"text","x":743.125,"y":446.875,"width":123.75000000000001,"height":56.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bak"],"frameId":null,"roundness":null,"seed":2132692552,"version":1,"versionNonce":272812827,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Backup files\ndaily changes +\nweekly full","originalText":"Backup files\ndaily changes +\nweekly full","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e386b885","type":"rectangle","x":980,"y":430,"width":170,"height":90,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#e9ecef","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":["reg"],"frameId":null,"roundness":{"type":3},"seed":324593663,"version":1,"versionNonce":1268759748,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e73d23185","type":"text","x":1003.125,"y":456.25,"width":123.75000000000001,"height":37.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["reg"],"frameId":null,"roundness":null,"seed":999339856,"version":1,"versionNonce":1731949819,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"Copy in another\nregion","originalText":"Copy in another\nregion","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e53f3294e","type":"arrow","x":130,"y":285,"width":70,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":313906941,"version":1,"versionNonce":1313343736,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[70,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e69cb186c","type":"arrow","x":350,"y":285,"width":80,"height":100,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1279621630,"version":1,"versionNonce":2105190988,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[80,-100]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e3cb7ba57","type":"arrow","x":350,"y":285,"width":80,"height":0,"angle":0,"strokeColor":"#e03131","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1411472909,"version":1,"versionNonce":2013196150,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[80,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e2cda274a","type":"arrow","x":350,"y":285,"width":80,"height":100,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":334819384,"version":1,"versionNonce":1178238480,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[80,100]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e462e38b0","type":"arrow","x":590,"y":185,"width":130,"height":95,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":281285696,"version":1,"versionNonce":45949018,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[130,95]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e1d2b661","type":"arrow","x":590,"y":385,"width":130,"height":85,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1716606102,"version":1,"versionNonce":2084970774,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[130,-85]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e5cf9b1af","type":"arrow","x":890,"y":290,"width":90,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1395165731,"version":1,"versionNonce":220701309,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[90,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e436701fd","type":"text","x":892.1,"y":260,"width":85.80000000000001,"height":32.5,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1609530891,"version":1,"versionNonce":2004944006,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"replicate\nasync / sync","originalText":"replicate\nasync / sync","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e11d2f7c5","type":"arrow","x":805,"y":330,"width":0,"height":100,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":931598661,"version":1,"versionNonce":2118598746,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[0,100]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e6f9545bd","type":"text","x":815,"y":368,"width":114.4,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":418341499,"version":1,"versionNonce":1774154891,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"dump every night","originalText":"dump every night","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6fdc2e07","type":"arrow","x":890,"y":475,"width":90,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":453209983,"version":1,"versionNonce":60116074,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"points":[[0,0],[90,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e203c1f86","type":"text","x":895.675,"y":456,"width":78.65,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":456941127,"version":1,"versionNonce":629141097,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"weekly copy","originalText":"weekly copy","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e402612ec","type":"text","x":918.425,"y":340,"width":293.15000000000003,"height":16.25,"angle":0,"strokeColor":"#1971c2","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":516554407,"version":1,"versionNonce":1639989841,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"main dies → promote me (failover, ~1 min)","originalText":"main dies → promote me (failover, ~1 min)","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4b105f87","type":"text","x":630.55,"y":352,"width":164.45000000000002,"height":16.25,"angle":0,"strokeColor":"#e03131","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":700056706,"version":1,"versionNonce":556981657,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"what if this disk dies?","originalText":"what if this disk dies?","fontSize":13,"fontFamily":5,"textAlign":"right","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e35a23404","type":"ellipse","x":573,"y":143,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge45ad59f8"],"frameId":null,"roundness":null,"seed":1791420123,"version":1,"versionNonce":281478590,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e7cbb823","type":"text","x":582.425,"y":148,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge45ad59f8"],"frameId":null,"roundness":null,"seed":1954246751,"version":1,"versionNonce":1588970510,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"1","originalText":"1","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e72e7f6fe","type":"ellipse","x":873,"y":233,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge2d48cb79"],"frameId":null,"roundness":null,"seed":983893223,"version":1,"versionNonce":1422653865,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e4aab2c30","type":"text","x":882.425,"y":238,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge2d48cb79"],"frameId":null,"roundness":null,"seed":1750300172,"version":1,"versionNonce":1941962533,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"2","originalText":"2","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e35d725ae","type":"ellipse","x":1133,"y":233,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge4225381b"],"frameId":null,"roundness":null,"seed":1776268929,"version":1,"versionNonce":1970791018,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e7067d5a7","type":"text","x":1142.425,"y":238,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge4225381b"],"frameId":null,"roundness":null,"seed":1077282907,"version":1,"versionNonce":280811967,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"3","originalText":"3","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e136f5fee","type":"ellipse","x":873,"y":413,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge4412d72c"],"frameId":null,"roundness":null,"seed":1124221837,"version":1,"versionNonce":1096391373,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e264ebc7","type":"text","x":882.425,"y":418,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge4412d72c"],"frameId":null,"roundness":null,"seed":1874335756,"version":1,"versionNonce":945161047,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"4","originalText":"4","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e1770144f","type":"ellipse","x":1133,"y":413,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge63648dca"],"frameId":null,"roundness":null,"seed":1306861148,"version":1,"versionNonce":8444937,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e63553eab","type":"text","x":1142.425,"y":418,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge63648dca"],"frameId":null,"roundness":null,"seed":1716205476,"version":1,"versionNonce":321698388,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"5","originalText":"5","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e160f7510","type":"rectangle","x":0,"y":570,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note1"],"frameId":null,"roundness":{"type":3},"seed":303995577,"version":1,"versionNonce":1016818332,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e4f3eb59c","type":"text","x":10,"y":579,"width":214.50000000000003,"height":65.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note1"],"frameId":null,"roundness":null,"seed":1557340696,"version":1,"versionNonce":258420911,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"① Stateless API servers\nOne dies → the others carry\non. Add more any time. Nothing\nhere needs protecting.","originalText":"① Stateless API servers\nOne dies → the others carry\non. Add more any time. Nothing\nhere needs protecting.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e473a97f0","type":"rectangle","x":225,"y":570,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note2"],"frameId":null,"roundness":{"type":3},"seed":132618470,"version":1,"versionNonce":700041331,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e5756a259","type":"text","x":235,"y":579,"width":214.50000000000003,"height":65.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note2"],"frameId":null,"roundness":null,"seed":1113145387,"version":1,"versionNonce":1139726172,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"② Stateful database\nThe only copy of the truth. If\nits disk dies the data is gone\n— unless you made copies.","originalText":"② Stateful database\nThe only copy of the truth. If\nits disk dies the data is gone\n— unless you made copies.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4718b821","type":"rectangle","x":450,"y":570,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note3"],"frameId":null,"roundness":{"type":3},"seed":1036132969,"version":1,"versionNonce":1684212314,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e63640716","type":"text","x":460,"y":579,"width":193.05,"height":81.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note3"],"frameId":null,"roundness":null,"seed":227868237,"version":1,"versionNonce":1896717286,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"③ Standby replica\nLive copy, seconds behind.\nMain dies → promote it\n(failover, about a minute).\nCosts a second server.","originalText":"③ Standby replica\nLive copy, seconds behind.\nMain dies → promote it\n(failover, about a minute).\nCosts a second server.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e47b7c8b0","type":"rectangle","x":675,"y":570,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note4"],"frameId":null,"roundness":{"type":3},"seed":122025547,"version":1,"versionNonce":533637501,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e187cb82d","type":"text","x":685,"y":579,"width":200.20000000000002,"height":81.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note4"],"frameId":null,"roundness":null,"seed":594674889,"version":1,"versionNonce":90621425,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"④ Backups\nDaily changes + weekly full.\nCheap. Restore takes minutes\nto hours and loses writes\nsince the last backup.","originalText":"④ Backups\nDaily changes + weekly full.\nCheap. Restore takes minutes\nto hours and loses writes\nsince the last backup.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e62d973ae","type":"rectangle","x":900,"y":570,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note5"],"frameId":null,"roundness":{"type":3},"seed":209906377,"version":1,"versionNonce":1090307498,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e39e0e697","type":"text","x":910,"y":579,"width":200.20000000000002,"height":81.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note5"],"frameId":null,"roundness":null,"seed":1206304673,"version":1,"versionNonce":59841250,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"⑤ Another region\nOne copy far away survives a\nflood or fire in the data\ncentre. This is disaster\nrecovery.","originalText":"⑤ Another region\nOne copy far away survives a\nflood or fire in the data\ncentre. This is disaster\nrecovery.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e61477484","type":"rectangle","x":1125,"y":570,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note6"],"frameId":null,"roundness":{"type":3},"seed":1919876317,"version":1,"versionNonce":1959553144,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false},{"id":"e81c785b","type":"text","x":1135,"y":579,"width":214.50000000000003,"height":97.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note6"],"frameId":null,"roundness":null,"seed":951868678,"version":1,"versionNonce":699249954,"isDeleted":false,"boundElements":[],"updated":1791906203453,"link":null,"locked":false,"text":"⑥ Why both\nA replica copies mistakes\n(DROP TABLE) in a second; only\na backup goes back in time.\nRPO = data lost, RTO = time\ndown.","originalText":"⑥ Why both\nA replica copies mistakes\n(DROP TABLE) in a second; only\na backup goes back in time.\nRPO = data lost, RTO = time\ndown.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true}]}</script>
+  </section>
+
+  <!-- 1 -->
+  <section id="why" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">1</span>
+      <div>
+        <h2>Why the database is the hard part</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 0:00</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>A typical backend has two kinds of machines.</p>
+      <p><strong>API servers</strong> run your code. They keep nothing important on themselves; every request reads and writes through the database. A machine like this is called <span class="term">stateless</span> — “state” just means remembered data, and it has none. Put several of them behind a load balancer (a box that spreads requests across them) and any one can answer any request. If one crashes, only the requests it was handling at that instant fail. The rest carry on.</p>
+      <p><strong>The database</strong> is the opposite. It is <span class="term">stateful</span>: it is where the data actually lives. If it goes down, every API server is healthy but useless. In most cases that is a complete outage.</p>
+    </div>
+
+    <figure>
+      <p class="cap">One request path, two very different kinds of failure</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 264" role="img" aria-label="Users reach a load balancer, which spreads requests over three API servers. All three talk to one database. One API server has crashed and the others carry on. If the database crashes, everything stops.">
+          <text x="405" y="18" text-anchor="middle" class="t-mono t-muted">STATELESS · HOLD NO DATA</text>
+          <text x="640" y="18" text-anchor="middle" class="t-mono t-muted">STATEFUL · HOLDS THE DATA</text>
+
+          <path class="wire" d="M104 132H148" marker-end="url(#ah)"/>
+          <path class="wire" d="M278 132C312 132 306 59 338 59" marker-end="url(#ah)"/>
+          <path class="wire red dash" d="M278 132H338" marker-end="url(#ah-red)"/>
+          <path class="wire" d="M278 132C312 132 306 205 338 205" marker-end="url(#ah)"/>
+          <path class="wire" d="M470 59C528 59 524 118 580 122" marker-end="url(#ah)"/>
+          <path class="wire" d="M470 205C528 205 524 146 580 142" marker-end="url(#ah)"/>
+
+          <rect class="node" x="16" y="107" width="88" height="50" rx="10"/>
+          <text x="60" y="137" text-anchor="middle">Users</text>
+          <rect class="node" x="150" y="107" width="128" height="50" rx="10"/>
+          <text x="214" y="137" text-anchor="middle">Load balancer</text>
+
+          <rect class="node" x="340" y="36" width="130" height="46" rx="10"/>
+          <text x="405" y="64" text-anchor="middle">API server 1</text>
+          <rect class="node dead" x="340" y="109" width="130" height="46" rx="10"/>
+          <text x="405" y="137" text-anchor="middle" class="t-red">API server 2 ✕</text>
+          <rect class="node" x="340" y="182" width="130" height="46" rx="10"/>
+          <text x="405" y="210" text-anchor="middle">API server 3</text>
+
+          <path class="node main" d="M582 92v80a58 14 0 0 0 116 0v-80"/>
+          <ellipse class="node main" cx="640" cy="92" rx="58" ry="14"/>
+          <text x="640" y="142" text-anchor="middle" class="t-b">Database</text>
+
+          <text x="405" y="254" text-anchor="middle" class="t-teal">one crashes → the others carry on</text>
+          <text x="640" y="254" text-anchor="middle" class="t-red">this crashes → everything stops</text>
+        </svg>
+      </div>
+    </figure>
+
+    <div class="prose"><p>There are two levels of bad here, and the lesson cares about the worse one.</p></div>
+    <div class="grid-2">
+      <div class="card amber">
+        <span class="k">Bad</span>
+        <h3>The database goes down</h3>
+        <p>The machine restarts, or the database software crashes. You are offline until it comes back, but the data is still sitting on the disk.</p>
+      </div>
+      <div class="card red">
+        <span class="k">Worst</span>
+        <h3>The disk itself dies</h3>
+        <p>The data is gone. Restarting fixes nothing, because there is nothing left to start from. This is the case you must plan for.</p>
+      </div>
+    </div>
+    <div class="callout key">
+      <span class="cap">Key idea</span>
+      <p>A good design always has an answer to: “the disk holding our data just died — now what?” “We had no backup” is not an answer.</p>
+    </div>
+  </section>
+
+  <!-- 2 -->
+  <section id="copies" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">2</span>
+      <div>
+        <h2>The one idea: keep more than one copy</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 1:09</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The only way to protect yourself against losing data is to have another copy of it somewhere else. That is what <span class="term">data redundancy</span> means: storing the same data more than once, on purpose.</p>
+      <p>With a second copy you can always get back to the <span class="term">last known good point</span> — the most recent moment for which you still hold a healthy copy. Everything else in this lesson is a different way of making that copy. The methods differ mainly in one thing: <strong>how old the copy is at the moment you need it.</strong></p>
+      <p>You make two choices.</p>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <span class="k">Choice 1</span>
+        <h3>How much do you copy?</h3>
+        <ul>
+          <li><strong>A row or document</strong> — copy single records as they change.</li>
+          <li><strong>A table</strong> — dump one table and recreate it elsewhere.</li>
+          <li><strong>The whole database</strong> — dump everything.</li>
+        </ul>
+      </div>
+      <div class="card teal">
+        <span class="k">Choice 2</span>
+        <h3>Where does the copy live?</h3>
+        <ul>
+          <li><strong>A different table</strong> in the same database.</li>
+          <li><strong>A different database</strong> on another machine.</li>
+          <li><strong>A different region</strong> — another part of the world.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The further away the copy lives, the bigger the failure it survives. A copy on the same disk does not survive that disk dying. A copy in the same building does not survive a flood in that building.</p>
+    </div>
+  </section>
+
+  <!-- 3 -->
+  <section id="backup" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">3</span>
+      <div>
+        <h2>Method one: backup and restore</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 2:17</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The simplest method. Every so often, save a copy of the data to a file and store it somewhere safe. When something goes wrong, load the most recent file into a fresh database. The lesson gives three habits.</p>
+    </div>
+    <div class="grid-3">
+      <div class="card teal">
+        <span class="k">Daily</span>
+        <h3>Back up the changes</h3>
+        <p>Take one complete backup, then each day save only what changed that day. This is an <span class="term">incremental</span> backup. It is small and quick, so you can afford it daily. Crash today and you still have everything up to yesterday.</p>
+      </div>
+      <div class="card">
+        <span class="k">Weekly</span>
+        <h3>Back up everything</h3>
+        <p>Once a week — say every Sunday — take a <span class="term">full</span> backup no matter what. If a daily file turns out to be broken, you still have a clean starting point that depends on nothing else.</p>
+      </div>
+      <div class="card amber">
+        <span class="k">Elsewhere</span>
+        <h3>One copy in another region</h3>
+        <p>Send a copy to a data centre far away. If a flood or fire takes out the whole data centre, your data still exists. This part is called <span class="term">disaster recovery</span>.</p>
+      </div>
+    </div>
+
+    <figure>
+      <p class="cap">A week of backups, and a crash on Thursday afternoon</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 236" role="img" aria-label="Sunday has a full backup. Monday, Tuesday and Wednesday each have a small backup of that day's changes. The disk crashes on Thursday at 3 pm, before Thursday's backup runs. Restoring uses Sunday's full backup plus Monday, Tuesday and Wednesday. Thursday's writes are lost.">
+          <rect class="node main" x="20" y="50" width="96" height="100" rx="8"/>
+          <text x="68" y="97" text-anchor="middle" class="t-b">FULL</text>
+          <text x="68" y="116" text-anchor="middle" class="t-muted">everything</text>
+
+          <rect class="node copy" x="124" y="112" width="96" height="38" rx="8"/>
+          <text x="172" y="136" text-anchor="middle">+ changes</text>
+          <rect class="node copy" x="228" y="112" width="96" height="38" rx="8"/>
+          <text x="276" y="136" text-anchor="middle">+ changes</text>
+          <rect class="node copy" x="332" y="112" width="96" height="38" rx="8"/>
+          <text x="380" y="136" text-anchor="middle">+ changes</text>
+
+          <rect class="node ghost" x="436" y="112" width="96" height="38" rx="8"/>
+          <text x="484" y="136" text-anchor="middle" class="t-muted">not yet run</text>
+          <rect class="node ghost" x="540" y="112" width="96" height="38" rx="8"/>
+          <rect class="node ghost" x="644" y="112" width="96" height="38" rx="8"/>
+
+          <g class="t-mono t-muted" text-anchor="middle">
+            <text x="68" y="170" class="t-mono t-muted">SUN</text>
+            <text x="172" y="170" class="t-mono t-muted">MON</text>
+            <text x="276" y="170" class="t-mono t-muted">TUE</text>
+            <text x="380" y="170" class="t-mono t-muted">WED</text>
+            <text x="484" y="170" class="t-mono t-muted">THU</text>
+            <text x="588" y="170" class="t-mono t-muted">FRI</text>
+            <text x="692" y="170" class="t-mono t-muted">SAT</text>
+          </g>
+
+          <path class="wire red dash" d="M484 34V104"/>
+          <text x="484" y="24" text-anchor="middle" class="t-red">Disk crash · Thu 3 pm</text>
+
+          <path class="wire teal" d="M20 186v8H428v-8"/>
+          <text x="224" y="220" text-anchor="middle" class="t-teal">Restore = Sunday’s full + Mon + Tue + Wed</text>
+          <path class="wire red" d="M436 186v8H532v-8"/>
+          <text x="484" y="220" text-anchor="middle" class="t-red">Lost: Thursday’s writes</text>
+        </svg>
+      </div>
+      <figcaption>To restore, you load the last full backup and then every daily file after it, in order. If one file in that chain is damaged, the days after it cannot be rebuilt. That is why the weekly full backup matters.</figcaption>
+    </figure>
+
+    <div class="grid-2">
+      <div class="card teal">
+        <span class="k">What you get</span>
+        <ul>
+          <li>Almost always the easiest thing to set up.</li>
+          <li>Cheap — backup files only need storage.</li>
+          <li>When something goes wrong, the fix is simple: restore the last backup.</li>
+        </ul>
+      </div>
+      <div class="card red">
+        <span class="k">What you give up</span>
+        <ul>
+          <li>The copy is always a bit old. Anything written after the last backup is lost.</li>
+          <li>Restoring takes time. A big database can take hours to load, and you are offline while it does.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout key">
+      <span class="cap">Why bother if it loses a day?</span>
+      <p>Some data is far better than no data. With yesterday’s data the business keeps running; with none it does not. API servers can be recreated in minutes. Data cannot be recreated at all.</p>
+    </div>
+  </section>
+
+  <!-- 4 -->
+  <section id="replica" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">4</span>
+      <div>
+        <h2>Method two: continuous redundancy</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 4:24</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>A backup is a copy made now and then. Continuous redundancy means keeping a second copy up to date <em>all the time</em>.</p>
+      <p>You run a second database, the <span class="term">replica</span>, next to the first one, the <span class="term">main</span> (also called master or primary). Every write that reaches the main also reaches the replica, so at any moment you hold two live copies.</p>
+      <p>If the main’s disk dies, you make the replica the new main and point the API servers at it. This switch is called <span class="term">failover</span>. It happens almost instantly, compared with the hours a restore can take.</p>
+      <h3>How does a write reach the replica? Two ways. <span class="ts">▶ 5:43</span></h3>
+    </div>
+
+    <div class="grid-2">
+      <figure style="margin:0">
+        <p class="cap">Way 1 · The API writes to both</p>
+        <svg class="dia" viewBox="0 0 340 204" role="img" aria-label="The API server sends each write to the main database and also to the replica.">
+          <path class="wire accent" d="M120 32H85V104" marker-end="url(#ah-accent)"/>
+          <path class="wire accent" d="M220 32H255V104" marker-end="url(#ah-accent)"/>
+          <text x="76" y="74" text-anchor="end" class="t-mono t-accent">write</text>
+          <text x="264" y="74" class="t-mono t-accent">write</text>
+          <rect class="node" x="120" y="12" width="100" height="40" rx="8"/>
+          <text x="170" y="37" text-anchor="middle">API server</text>
+          <path class="node main" d="M43 118v50a42 11 0 0 0 84 0v-50"/>
+          <ellipse class="node main" cx="85" cy="118" rx="42" ry="11"/>
+          <text x="85" y="198" text-anchor="middle" class="t-b">main</text>
+          <path class="node copy" d="M213 118v50a42 11 0 0 0 84 0v-50"/>
+          <ellipse class="node copy" cx="255" cy="118" rx="42" ry="11"/>
+          <text x="255" y="198" text-anchor="middle" class="t-b">replica</text>
+        </svg>
+        <figcaption>Your application sends each write to the main and to the replica. The lesson labels this the synchronous way: both copies get the write as part of the same request.</figcaption>
+      </figure>
+      <figure style="margin:0">
+        <p class="cap">Way 2 · The database copies it across</p>
+        <svg class="dia" viewBox="0 0 340 204" role="img" aria-label="The API server writes only to the main database. The main database then copies each change to the replica a moment later.">
+          <path class="wire accent" d="M120 32H85V104" marker-end="url(#ah-accent)"/>
+          <text x="76" y="74" text-anchor="end" class="t-mono t-accent">write</text>
+          <path class="wire teal" d="M130 148H210" marker-end="url(#ah-teal)"/>
+          <text x="170" y="138" text-anchor="middle" class="t-mono t-teal">async copy</text>
+          <rect class="node" x="120" y="12" width="100" height="40" rx="8"/>
+          <text x="170" y="37" text-anchor="middle">API server</text>
+          <path class="node main" d="M43 118v50a42 11 0 0 0 84 0v-50"/>
+          <ellipse class="node main" cx="85" cy="118" rx="42" ry="11"/>
+          <text x="85" y="198" text-anchor="middle" class="t-b">main</text>
+          <path class="node copy" d="M213 118v50a42 11 0 0 0 84 0v-50"/>
+          <ellipse class="node copy" cx="255" cy="118" rx="42" ry="11"/>
+          <text x="255" y="198" text-anchor="middle" class="t-b">replica</text>
+        </svg>
+        <figcaption>The API writes only to the main. The main forwards each change to the replica in the background. This is asynchronous replication: the copy arrives a moment later.</figcaption>
+      </figure>
+    </div>
+
+    <div class="prose">
+      <p>Either way the goal is the same: a real-time duplicate, so nothing is missed.</p>
+      <h3>The replica here is a standby <span class="ts">▶ 6:26</span></h3>
+      <p>In this lesson the replica has one job: to exist. It serves no user traffic — no reads, no writes. It only stays in sync so that it can step in when the main is gone.</p>
+      <p>(Replicas can also be used to share read traffic. That is a different goal — handling more load, not safety.)</p>
+    </div>
+    <div class="callout warn">
+      <span class="cap">Be precise about what this protects</span>
+      <p>A replica saves you when a disk or a machine dies. On its own it is not disaster recovery: if both databases sit in the same data centre and that data centre is lost, both copies are lost. You still need the copy in another region from section 3.</p>
+    </div>
+  </section>
+
+  <!-- 5 -->
+  <section id="pick" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">5</span>
+      <div>
+        <h2>Picking between them</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 6:10</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson’s rule is short: some data matters more than other data. <strong>More critical data gets continuous redundancy. Less critical data gets periodic backups.</strong></p>
+      <p>Side by side:</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th></th><th>Backup and restore</th><th>Standby replica</th></tr></thead>
+        <tbody>
+          <tr><th>How old is the copy?</th><td>Up to a day, or whatever your schedule is</td><td>Seconds at most</td></tr>
+          <tr><th>Data lost in a crash</th><td>Everything since the last backup</td><td>Little or nothing</td></tr>
+          <tr><th>Time to get back online</th><td>Minutes to hours — the files must be loaded</td><td>Seconds to minutes — just switch over</td></tr>
+          <tr><th>Cost</th><td>Low — only storage for files</td><td>High — a second full database running all the time</td></tr>
+          <tr><th>Good for</th><td>Logs, analytics, anything you could live without for a day</td><td>Orders, payments, user accounts</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 6 -->
+  <section id="deeper" class="extra">
+    <div class="sec-head">
+      <span class="sec-num">6</span>
+      <div>
+        <h2>Going deeper</h2>
+        <div class="sec-meta"><span class="badge">Extra depth · not in the video</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson stops at section 5. These are the follow-up questions an interviewer is likely to ask next.</p>
+
+      <h3>6.1 · Two numbers drive every decision</h3>
+      <p>Before choosing a method, ask the business two questions.</p>
+      <ul>
+        <li><strong>How much data can we afford to lose?</strong> Measured in time: “at most 5 minutes of writes.” The industry name is <span class="term">RPO</span> (recovery point objective).</li>
+        <li><strong>How long can we afford to be down?</strong> “At most 10 minutes.” The name is <span class="term">RTO</span> (recovery time objective).</li>
+      </ul>
+    </div>
+
+    <figure>
+      <p class="cap">The two gaps around a crash</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 36 760 130" role="img" aria-label="A timeline. The gap between the last good copy and the crash is the data you lose, called RPO. The gap between the crash and being back online is the time you are down, called RTO.">
+          <text x="30" y="72" class="t-mono t-muted">TIME →</text>
+          <path class="wire" d="M30 86H728" marker-end="url(#ah)"/>
+          <circle class="node main" cx="190" cy="86" r="7"/>
+          <circle class="node dead" cx="420" cy="86" r="7" style="stroke-dasharray:none"/>
+          <circle class="node copy" cx="640" cy="86" r="7"/>
+          <text x="190" y="62" text-anchor="middle" class="t-accent">Last good copy</text>
+          <text x="420" y="62" text-anchor="middle" class="t-red">Crash</text>
+          <text x="640" y="62" text-anchor="middle" class="t-teal">Back online</text>
+          <path class="wire red" d="M190 104v8H416v-8"/>
+          <text x="303" y="134" text-anchor="middle" class="t-b">data you lose</text>
+          <text x="303" y="154" text-anchor="middle" class="t-mono t-muted">RPO</text>
+          <path class="wire teal" d="M424 104v8H640v-8"/>
+          <text x="532" y="134" text-anchor="middle" class="t-b">time you are down</text>
+          <text x="532" y="154" text-anchor="middle" class="t-mono t-muted">RTO</text>
+        </svg>
+      </div>
+      <figcaption>Daily backups alone: you can lose up to 24 hours, and you are down for as long as a restore takes. A standby replica: you lose seconds and are down for a minute or two. Smaller numbers cost more money, so ask what the business actually needs.</figcaption>
+    </figure>
+
+    <div class="prose">
+      <h3>6.2 · A replica is not a backup</h3>
+      <p>This is the most common trap. A replica faithfully copies <em>everything</em> — including mistakes. If someone runs a <code>DELETE</code> that wipes the orders table, or a bug writes garbage, the replica has the same damage a moment later. Now you have two copies of broken data.</p>
+      <p>Only a backup can take you back in time, to before the mistake. So the two methods are not rivals. They cover different failures.</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>What went wrong</th><th>Does a replica help?</th><th>Does a backup help?</th></tr></thead>
+        <tbody>
+          <tr><th>A disk or machine dies</th><td><span class="good">Yes</span> — switch over</td><td><span class="good">Yes</span>, but slower and with some loss</td></tr>
+          <tr><th>Data deleted by mistake, or corrupted by a bug</th><td><span class="bad">No</span> — the mistake is copied too</td><td><span class="good">Yes</span> — restore to before it happened</td></tr>
+          <tr><th>The whole data centre is lost</th><td>Only if the replica is in another region</td><td>Only if a copy is kept in another region</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout key">
+      <span class="cap">Takeaway</span>
+      <p>Real systems run both: a replica for fast recovery from hardware failure, and backups to undo mistakes.</p>
+    </div>
+
+    <div class="prose">
+      <h3>6.3 · Synchronous or asynchronous: the real trade-off</h3>
+      <p>The whole question is: <strong>when does the main tell the user “saved”?</strong></p>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <span class="k">Synchronous</span>
+        <h3>Wait for the replica, then answer</h3>
+        <ul>
+          <li><span class="good">+</span> If the main dies, nothing is lost. Every confirmed write is on two machines.</li>
+          <li><span class="bad">−</span> Every write is slower, because it waits for a network round trip.</li>
+          <li><span class="bad">−</span> If the replica is slow or unreachable, writes stall.</li>
+        </ul>
+      </div>
+      <div class="card teal">
+        <span class="k">Asynchronous</span>
+        <h3>Answer now, copy afterwards</h3>
+        <ul>
+          <li><span class="good">+</span> Writes stay fast. A replica problem never blocks users.</li>
+          <li><span class="bad">−</span> The replica is always slightly behind. This gap is called <span class="term">replication lag</span>.</li>
+          <li><span class="bad">−</span> If the main dies, the last few writes that were not yet forwarded are gone.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="prose">
+      <p><strong>Rule of thumb.</strong> Money, and anything you told the user was saved: synchronous, to at least one nearby replica. Everything else: asynchronous. Across regions it is almost always asynchronous, because the distance would make every write slow.</p>
+      <p>Many databases also offer a middle setting: wait until one replica has <em>received</em> the write, but not until it has finished applying it. MySQL calls this semi-synchronous replication.</p>
+
+      <h3>6.4 · Why “the API writes to both” is risky</h3>
+      <p>Way 1 from the lesson looks simple, but two separate writes cannot easily be made all-or-nothing.</p>
+      <ul>
+        <li>The write to the main succeeds and the write to the replica fails because of a network blip. The copies now disagree, and nothing notices.</li>
+        <li>Two requests change the same row at nearly the same time. The main sees A then B; the replica sees B then A. They end up with different values.</li>
+      </ul>
+      <p>So in practice you let the database do the copying (Way 2). The main keeps an ordered log of every change, and the replica replays that same log in the same order, so the two cannot drift apart like this. That built-in feature is what people normally mean by “replication.” It can run in synchronous or asynchronous mode.</p>
+
+      <h3>6.5 · Failover is harder than it sounds</h3>
+      <p>Three things have to go right.</p>
+      <ol>
+        <li><strong>Detect</strong> that the main is truly dead, and not just slow for a few seconds.</li>
+        <li><strong>Promote</strong> the replica and point every API server at it.</li>
+        <li><strong>Fence off the old main.</strong> If it comes back still believing it is the main, two databases accept writes and their data splits apart. This is called <span class="term">split brain</span>.</li>
+      </ol>
+      <p>In an interview you do not need to build this. Say you would use the managed database’s automatic failover, and name these three risks.</p>
+
+      <h3>6.6 · Going back to an exact moment</h3>
+      <p>Daily backups only take you back to last night. To do better, databases also keep a running log of every change (MySQL calls it the binary log; PostgreSQL the write-ahead log). Restore last night’s backup, then replay the log up to one second before the mistake. This is <span class="term">point-in-time recovery</span>. It is the answer to “someone dropped the table at 2:07 pm.”</p>
+
+      <h3>6.7 · Two habits that make backups real</h3>
+      <ul>
+        <li><strong>Test the restore.</strong> A backup you have never restored is a hope, not a backup. Restore to a scratch server on a schedule and check the data.</li>
+        <li><strong>The 3-2-1 rule.</strong> Keep 3 copies of the data, on 2 different kinds of storage, with 1 in a different location.</li>
+      </ul>
+
+      <h3>6.8 · What this looks like on a cloud database</h3>
+      <p>You rarely build any of this by hand. Each idea in the lesson maps to a switch on a managed database. On AWS RDS, for example:</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>Idea from the lesson</th><th>On AWS RDS</th></tr></thead>
+        <tbody>
+          <tr><th>Daily and weekly backups</th><td><strong>Automated backups</strong> — a daily snapshot plus the change log, with point-in-time recovery (usually to within the last 5 minutes)</td></tr>
+          <tr><th>Standby replica that serves no traffic</th><td><strong>Multi-AZ</strong> — a synchronous standby in another zone, with automatic failover in about 1–2 minutes</td></tr>
+          <tr><th>One copy in another region</th><td><strong>Cross-region backup copies</strong>, or a cross-region read replica (asynchronous)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>A “zone” (availability zone) is a separate data centre inside the same region.</p>
+    </div>
+  </section>
+
+  <!-- 7 -->
+  <section id="lab" class="lab">
+    <div class="sec-head">
+      <span class="sec-num">7</span>
+      <div>
+        <h2>Hands-on lab</h2>
+        <div class="sec-meta"><span class="badge">Exercise from the video</span><span class="ts">▶ 7:03 · commands added here</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson ends with three tasks: set up replication between two MySQL servers, back up a MySQL database, and restore it. Here is one way to do all three on a laptop with Docker and MySQL 8.4. Allow about 20 minutes.</p>
+    </div>
+
+    <ol class="step-list">
+      <li>
+        <b>Start two MySQL servers</b>
+        <p>Each server needs its own <code>server-id</code>. The two <code>gtid</code> flags give every change a unique ID, so the replica can work out by itself which changes it is missing. Wait about 30 seconds for both to start.</p>
+<pre><code>docker network create dbnet
+
+docker run -d --name db-main --network dbnet -e MYSQL_ROOT_PASSWORD=root \
+  mysql:8.4 --server-id=1 --gtid-mode=ON --enforce-gtid-consistency=ON
+
+docker run -d --name db-replica --network dbnet -e MYSQL_ROOT_PASSWORD=root \
+  mysql:8.4 --server-id=2 --gtid-mode=ON --enforce-gtid-consistency=ON</code></pre>
+      </li>
+      <li>
+        <b>On the main: create a login for the replica</b>
+        <p>The replica connects to the main like any other client, so it needs a user that is allowed to read the change log.</p>
+<pre><code>docker exec -it db-main mysql -uroot -proot</code></pre>
+<pre><code>CREATE USER 'repl'@'%' IDENTIFIED BY 'repl_pass';
+GRANT REPLICATION SLAVE ON *.* TO 'repl'@'%';</code></pre>
+      </li>
+      <li>
+        <b>On the replica: tell it who to follow</b>
+        <p>In the status output, look for <code>Replica_IO_Running: Yes</code> and <code>Replica_SQL_Running: Yes</code>. <code>Seconds_Behind_Source</code> is the replication lag.</p>
+<pre><code>docker exec -it db-replica mysql -uroot -proot</code></pre>
+<pre><code>CHANGE REPLICATION SOURCE TO
+  SOURCE_HOST = 'db-main',
+  SOURCE_USER = 'repl',
+  SOURCE_PASSWORD = 'repl_pass',
+  SOURCE_AUTO_POSITION = 1,
+  GET_SOURCE_PUBLIC_KEY = 1;
+START REPLICA;
+SHOW REPLICA STATUS\G</code></pre>
+      </li>
+      <li>
+        <b>Watch a write travel</b>
+        <p>Write on the main, read on the replica. This is asynchronous replication — Way 2 from section 4.</p>
+<pre><code><span class="c">-- on db-main</span>
+CREATE DATABASE shop;
+CREATE TABLE shop.orders (id INT PRIMARY KEY AUTO_INCREMENT, item VARCHAR(50));
+INSERT INTO shop.orders (item) VALUES ('keyboard'), ('mouse');
+
+<span class="c">-- on db-replica: both rows are here</span>
+SELECT * FROM shop.orders;</code></pre>
+      </li>
+      <li>
+        <b>Take a backup</b>
+        <p>Run this in your normal terminal, not inside MySQL. <code>--single-transaction</code> takes a consistent picture without locking the tables. Open <code>shop_backup.sql</code> afterwards: it is plain SQL that rebuilds the database.</p>
+<pre><code>docker exec db-main mysqldump -uroot -proot --single-transaction \
+  --set-gtid-purged=OFF --databases shop &gt; shop_backup.sql</code></pre>
+      </li>
+      <li>
+        <b>Break it, then restore</b>
+        <p>Drop the table on the main and check the replica. It is gone there too — a replica is not a backup (section 6.2). Then load the backup file. The table comes back on the main, and replication carries the restore to the replica as well.</p>
+<pre><code><span class="c">-- on db-main: the "mistake"</span>
+DROP TABLE shop.orders;
+
+<span class="c">-- on db-replica: the table is gone here too</span>
+SELECT * FROM shop.orders;</code></pre>
+<pre><code>docker exec -i db-main mysql -uroot -proot &lt; shop_backup.sql</code></pre>
+      </li>
+      <li>
+        <b>Clean up</b>
+<pre><code>docker rm -f db-main db-replica
+docker network rm dbnet</code></pre>
+      </li>
+    </ol>
+
+    <div class="callout key">
+      <span class="cap">Try next</span>
+      <p>Stop the replica (<code>docker stop db-replica</code>), write a few rows on the main, start it again and watch it catch up. Then stop the main and promote the replica by running <code>STOP REPLICA; RESET REPLICA ALL;</code> on it — that is a failover done by hand.</p>
+    </div>
+  </section>
+
+  <!-- 8 -->
+  <section id="interview" class="extra">
+    <div class="sec-head">
+      <span class="sec-num">8</span>
+      <div>
+        <h2>In the interview</h2>
+        <div class="sec-meta"><span class="badge">Extra depth · not in the video</span></div>
+      </div>
+    </div>
+    <div class="callout say">
+      <span class="cap">What to say when you draw the database box</span>
+      <p>“The database is the one stateful piece, so I’d protect it three ways. A standby replica in a second zone with automatic failover, so a dead machine costs us about a minute. Daily incremental and weekly full backups with point-in-time recovery, so we can undo a bad delete. And a copy of the backups in another region, in case we lose the whole region. For payments I’d make replication synchronous so a confirmed payment is never lost. For everything else, asynchronous is fine.”</p>
+    </div>
+    <div class="prose"><p>Likely follow-ups. Answer each out loud before opening it.</p></div>
+
+    <details class="qa">
+      <summary>The main database’s disk just died. Walk me through what happens.</summary>
+      <div class="a">
+        <p>The replica is promoted to main and the API servers are pointed at it. Users see a minute or two of errors.</p>
+        <p>With synchronous replication no confirmed write is lost. With asynchronous we may lose the last second or so.</p>
+        <p>Then we build a fresh replica from the new main, so we are back to two copies.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>You already have a replica. Why still pay for backups?</summary>
+      <div class="a">
+        <p>A replica copies mistakes as faithfully as it copies good writes. A bad delete or a buggy release damages both copies within a second.</p>
+        <p>Backups are the only way to go back in time. The replica covers hardware failure; backups cover human and software failure.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>A developer ran DELETE without a WHERE at 2:07 pm. Now what?</summary>
+      <div class="a">
+        <p>Restore last night’s backup onto a new server and replay the change log up to 2:06 pm. Then copy the missing rows back into production.</p>
+        <p>We do not roll the whole live database back, because that would also throw away every good write made after 2:07.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Synchronous or asynchronous replication — which would you pick?</summary>
+      <div class="a">
+        <p>It depends on what losing a write costs. For payments or orders, synchronous to one nearby replica: slower writes are worth never losing a confirmed one.</p>
+        <p>For likes, view counts or activity feeds, asynchronous: losing the last second in a rare crash is acceptable, and writes stay fast.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>How do you survive losing a whole region?</summary>
+      <div class="a">
+        <p>The copy has to be in another region before the disaster. Ship backups there, and for faster recovery run an asynchronous replica there too.</p>
+        <p>Be honest about the cost: because it is asynchronous, a region failure can lose a few seconds of writes, and switching regions is a much bigger operation than a normal failover.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>How often should we back up?</summary>
+      <div class="a">
+        <p>Work backwards from how much data the business can afford to lose. If a day is fine, daily backups are enough.</p>
+        <p>If it is minutes, add continuous saving of the change log so you can recover to any moment. If it is zero, you need synchronous replication.</p>
+      </div>
+    </details>
+  </section>
+
+  <nav class="lesson-nav" aria-label="Lessons">
+    <a class="next" href="20-leader-election.html"><span>Lesson 20 →</span>Leader Election for auto-recovery</a>
+  </nav>
+
+  <footer>
+    <p>Notes on lesson 19, “Data Redundancy &amp; Recovery” (8 min 34 s). Blue sections follow the video. Amber sections add depth beyond it. The lab commands are written for MySQL 8.4.</p>
+  </footer>
+
+</div>
+
+<script>
+  (function(){
+    var themeBtn = document.getElementById("themeBtn");
+    if (themeBtn) themeBtn.addEventListener("click", function(){
+      var root = document.documentElement;
+      var isDark = root.getAttribute("data-theme") === "dark"
+        || (!root.getAttribute("data-theme") && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+      root.setAttribute("data-theme", isDark ? "light" : "dark");
+    });
+  })();
+</script>
+<script src="../js/vendor/rough.js"></script>
+<script src="../js/sketch.js"></script>
+</body>
+</html>
