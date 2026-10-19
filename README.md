@@ -5,8 +5,8 @@ A small static site (served by Vercel from the repo root).
 ```
 index.html        the learning plan
 approach.html     how to tackle any question: the 7-step route + the picture to draw
-sketches.html     all six sketches on one page, each with an “Open in Excalidraw” button
-notes/            one page per lesson (19–22), each with its own sketch
+sketches.html     all nine sketches on one page, each with an “Open in Excalidraw” button
+notes/            one page per lesson (19–24, 26), each with its own sketch
 diagrams/         the sketches as editable .excalidraw files (open at excalidraw.com → menu → Open)
 css/notes.css     shared styles for notes, approach and sketches
 js/sketch.js      draws an .excalidraw file as a hand-drawn SVG (uses js/vendor/rough.js)

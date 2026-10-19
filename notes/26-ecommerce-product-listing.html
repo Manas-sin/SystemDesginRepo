@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design an E-commerce Product Listing — notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Patrick+Hand&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../css/notes.css">
+<style>
+  /* page-specific: service boxes and the timeline */
+  svg.dia .svc{fill:color-mix(in srgb,var(--accent) 7%,var(--surface));stroke:var(--accent);stroke-dasharray:6 4;stroke-width:1.5}
+  svg.dia .tl{stroke:var(--line-strong);stroke-width:2}
+  svg.dia text.t-sm{font-size:11px}
+</style>
+</head>
+<body>
+
+<!-- arrowheads shared by every diagram on the page -->
+<svg class="dia" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head teal" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head red" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head accent" d="M0 0L10 5L0 10z"/></marker>
+  </defs>
+</svg>
+
+<div class="wrap">
+
+  <header class="hero">
+    <div class="topbar">
+      <p class="eyebrow">Lesson 26 · Design problem · Notes</p>
+      <div class="topbar-right">
+        <a class="back" href="../index.html">← Learning plan</a>
+        <button class="toggle" id="themeBtn" type="button">◐ Theme</button>
+      </div>
+    </div>
+    <h1>Design an E-commerce Product Listing</h1>
+    <p class="lede">The first full design problem in the course, kept deliberately small: one shop, a hundred products, lots of visitors. The point is not the shop. It is watching every box get a reason before it is drawn. These notes follow that walk, then add the numbers, the schema, the API and the follow-ups an interviewer will push on.</p>
+    <div class="chips">
+      <span class="chip"><b>19 min 39 s</b> video</span>
+      <span class="chip"><b>Blue</b> sections · from the video</span>
+      <span class="chip"><b style="color:var(--amber)">Amber</b> sections · extra depth</span>
+    </div>
+  </header>
+
+  <div class="tldr">
+    <h2>The whole lesson in six lines</h2>
+    <ol>
+      <li><strong>The problem:</strong> one shop owner, at most 100 products, hundreds of thousands of visitors. The owner can add, update, delete and list products; customers browse the catalog. No payments.</li>
+      <li><strong>Storage first, with arithmetic:</strong> 100 items × 1 KB = 100 KB. That fits on any single node. The data is structured (title, description, colour, price), so a relational database.</li>
+      <li><strong>Access over HTTP:</strong> API servers, more than one, so a load balancer in front. Users → load balancer → API servers → database. The classic three tiers.</li>
+      <li><strong>Two front ends, one backend:</strong> a customer-facing catalog frontend and a separate admin UI for the owner, both calling the same backend, which checks the admin role on every write.</li>
+      <li><strong>Load per piece:</strong> frontend and backend scale out behind their load balancers with autoscaling; the admin UI has one user and needs one server (plus a spare); the database is the read-heavy piece.</li>
+      <li><strong>Scale reads with replicas, not a cache:</strong> each API server opens two connections and spreads reads over main and replica. Writes go to main and are copied to replicas, so there is nothing to invalidate. “The main only takes writes” is a myth.</li>
+    </ol>
+  </div>
+
+  <ul class="toc" aria-label="Contents">
+    <li><a href="#sketch"><b>✎</b>The picture to draw</a></li>
+    <li><a href="#problem"><b>1</b>The problem</a></li>
+    <li><a href="#storage"><b>2</b>Storage</a></li>
+    <li><a href="#access"><b>3</b>HTTP, servers, load balancer</a></li>
+    <li><a href="#frontends"><b>4</b>Frontend and admin UI</a></li>
+    <li><a href="#load"><b>5</b>Load on each piece</a></li>
+    <li><a href="#reads"><b>6</b>Replicas, not cache</a></li>
+    <li><a href="#deeper"><b>7</b>Going deeper</a></li>
+    <li><a href="#lab"><b>8</b>Hands-on lab</a></li>
+    <li><a href="#interview"><b>9</b>In the interview</a></li>
+  </ul>
+
+  <section id="sketch" class="sketch-sec">
+    <div class="sec-head">
+      <span class="sec-num">✎</span>
+      <div>
+        <h2>The picture to draw</h2>
+        <div class="sec-meta"><span class="badge">Sketch · editable in Excalidraw</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>Left to right: customers and the owner, their two front ends, the one backend, the main database with its read replicas. Every service box stands for “a load balancer with servers behind it”. On the right, the one real decision of the lesson: replicas or cache. Draw it in the order the lesson builds it, and say the estimate out loud before you draw the database.</p>
+    </div>
+    <div class="paper"><button class="zoom-btn" type="button" data-zoom>⤢ Full size</button><div class="paper-scroll"><svg class="sketch" data-sketch="sk" role="img" aria-label="Customers reach a catalog frontend service; the shop owner reaches a separate admin UI. Both call one catalog backend service, which writes to the main catalog database and spreads reads over the main and two read replicas. A side panel compares read replicas with a cache. Notes explain each numbered part."></svg></div></div>
+    <p class="paper-foot"><span class="cap">Sketch · lesson 26</span><span><a class="btn ghost" href="../diagrams/26-ecommerce-product-listing.excalidraw" download>Download for Excalidraw</a> &nbsp; open it at excalidraw.com → menu → Open</span></p>
+    <script type="application/json" id="sk" data-sketch-src="diagrams/26-ecommerce-product-listing.excalidraw">{"elements":[{"id":"e29735a1d","type":"text","x":0,"y":0,"width":924.0000000000001,"height":35.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":2035525363,"version":1,"versionNonce":323946140,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"Lesson 26 · E-commerce product listing (one shop, 100 items)","originalText":"Lesson 26 · E-commerce product listing (one shop, 100 items)","fontSize":28,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e32899388","type":"text","x":0,"y":42,"width":1100.0,"height":20.0,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1397871145,"version":1,"versionNonce":103694313,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"Day-zero design: three tiers, two front ends, one backend, reads scaled with replicas instead of a cache. Follow the numbers.","originalText":"Day-zero design: three tiers, two front ends, one backend, reads scaled with replicas instead of a cache. Follow the numbers.","fontSize":16,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e945979a","type":"text","x":20,"y":78,"width":165.0,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1763673107,"version":1,"versionNonce":1150797846,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"A · The architecture","originalText":"A · The architecture","fontSize":15,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"ec0c7409","type":"rectangle","x":0,"y":150,"width":150,"height":90,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["cust"],"frameId":null,"roundness":{"type":3},"seed":785310973,"version":1,"versionNonce":1251527727,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e76c823b","type":"text","x":9.549999999999997,"y":168.75,"width":130.9,"height":52.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["cust"],"frameId":null,"roundness":null,"seed":1953574603,"version":1,"versionNonce":1089709947,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"Customers\n(their browsers)\n100s of thousands","originalText":"Customers\n(their browsers)\n100s of thousands","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e1b7b3ae7","type":"rectangle","x":230,"y":140,"width":210,"height":110,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["fe"],"frameId":null,"roundness":{"type":3},"seed":80521325,"version":1,"versionNonce":184570286,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e3781b3ae","type":"text","x":254.14999999999998,"y":168.75,"width":161.70000000000002,"height":52.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["fe"],"frameId":null,"roundness":null,"seed":898017870,"version":1,"versionNonce":150013384,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"Catalog frontend\n⚖ LB → ▭ ▭ ▭ servers\nautoscale on requests","originalText":"Catalog frontend\n⚖ LB → ▭ ▭ ▭ servers\nautoscale on requests","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e1ece0b93","type":"rectangle","x":0,"y":370,"width":150,"height":90,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffd8a8","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["owner"],"frameId":null,"roundness":{"type":3},"seed":194804717,"version":1,"versionNonce":1183364968,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e3656a514","type":"text","x":17.249999999999993,"y":388.75,"width":115.50000000000001,"height":52.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["owner"],"frameId":null,"roundness":null,"seed":126938844,"version":1,"versionNonce":1775651416,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"Shop owner\n(their browser)\none person","originalText":"Shop owner\n(their browser)\none person","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4860c968","type":"rectangle","x":230,"y":360,"width":210,"height":110,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffd8a8","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["admin"],"frameId":null,"roundness":{"type":3},"seed":265862674,"version":1,"versionNonce":2034632751,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e1c93182d","type":"text","x":234.89999999999998,"y":388.75,"width":200.20000000000002,"height":52.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["admin"],"frameId":null,"roundness":null,"seed":1354258845,"version":1,"versionNonce":1347402587,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"Admin UI\n⚖ LB → ▭ server (+1 spare)\nadd · update · delete","originalText":"Admin UI\n⚖ LB → ▭ server (+1 spare)\nadd · update · delete","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4a9fa479","type":"rectangle","x":520,"y":250,"width":210,"height":110,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["be"],"frameId":null,"roundness":{"type":3},"seed":2035189461,"version":1,"versionNonce":132847737,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e49de8268","type":"text","x":521.05,"y":278.75,"width":207.9,"height":52.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["be"],"frameId":null,"roundness":null,"seed":1257440635,"version":1,"versionNonce":851864843,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"Catalog backend\n⚖ LB → ▭ ▭ ▭ servers\nchecks admin role on writes","originalText":"Catalog backend\n⚖ LB → ▭ ▭ ▭ servers\nchecks admin role on writes","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e658f14f","type":"rectangle","x":830,"y":150,"width":200,"height":90,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#b2f2bb","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["main"],"frameId":null,"roundness":{"type":3},"seed":2096491879,"version":1,"versionNonce":474769609,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e5f66bd9","type":"text","x":860.7,"y":168.75,"width":138.60000000000002,"height":52.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["main"],"frameId":null,"roundness":null,"seed":1195428768,"version":1,"versionNonce":1843546982,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"Catalog DB (main)\nreads + writes\n100 items ≈ 100 KB","originalText":"Catalog DB (main)\nreads + writes\n100 items ≈ 100 KB","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e110bdf57","type":"rectangle","x":830,"y":290,"width":200,"height":80,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#b2f2bb","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":["rep1"],"frameId":null,"roundness":{"type":3},"seed":621931212,"version":1,"versionNonce":900094242,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e1276f353","type":"text","x":876.1,"y":312.5,"width":107.80000000000001,"height":35.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["rep1"],"frameId":null,"roundness":null,"seed":1161114103,"version":1,"versionNonce":252956897,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"Read replica 1\nreads only","originalText":"Read replica 1\nreads only","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4913b32d","type":"rectangle","x":830,"y":410,"width":200,"height":80,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#b2f2bb","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":["rep2"],"frameId":null,"roundness":{"type":3},"seed":662459677,"version":1,"versionNonce":1203143341,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e6876d418","type":"text","x":876.1,"y":432.5,"width":107.80000000000001,"height":35.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["rep2"],"frameId":null,"roundness":null,"seed":1464589643,"version":1,"versionNonce":388106950,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"Read replica 2\nreads only","originalText":"Read replica 2\nreads only","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"ed30edf2","type":"text","x":815.6,"y":534,"width":228.8,"height":16.25,"angle":0,"strokeColor":"#0b7285","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1248976841,"version":1,"versionNonce":1226652085,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"need more reads? add replica 3 …","originalText":"need more reads? add replica 3 …","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e51c7eaa4","type":"arrow","x":150,"y":195,"width":80,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":403449955,"version":1,"versionNonce":799717634,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"points":[[0,0],[80,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"ec789aea","type":"text","x":143.525,"y":172,"width":92.95,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1176272277,"version":1,"versionNonce":1529246226,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"HTTPS · pages","originalText":"HTTPS · pages","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e809781c","type":"arrow","x":440,"y":195,"width":80,"height":90,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1211971682,"version":1,"versionNonce":127992539,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"points":[[0,0],[80,90]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e4f3bb4d9","type":"text","x":470,"y":218,"width":92.95,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":442292976,"version":1,"versionNonce":1066042003,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"GET /products","originalText":"GET /products","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e571758ab","type":"arrow","x":150,"y":415,"width":80,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1141860530,"version":1,"versionNonce":918247488,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"points":[[0,0],[80,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e637c3b8d","type":"arrow","x":440,"y":415,"width":80,"height":75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":674625912,"version":1,"versionNonce":999872393,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"points":[[0,0],[40,0],[40,-75],[80,-75]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e4af3b0e9","type":"text","x":445,"y":422,"width":243.10000000000002,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1983075268,"version":1,"versionNonce":973206041,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"POST / PUT / DELETE  (admin token)","originalText":"POST / PUT / DELETE  (admin token)","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2e4854ad","type":"arrow","x":730,"y":280,"width":100,"height":85,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":643744727,"version":1,"versionNonce":533492028,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"points":[[0,0],[50,0],[50,-85],[100,-85]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e65ae3a14","type":"text","x":636.15,"y":210,"width":135.85000000000002,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":386046158,"version":1,"versionNonce":1501079115,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"writes + some reads","originalText":"writes + some reads","fontSize":13,"fontFamily":5,"textAlign":"right","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e63d17511","type":"arrow","x":730,"y":305,"width":100,"height":25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":524193278,"version":1,"versionNonce":175782304,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"points":[[0,0],[100,25]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e4986b758","type":"text","x":697.3,"y":348,"width":128.70000000000002,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":644780075,"version":1,"versionNonce":1127850897,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"reads, random pick","originalText":"reads, random pick","fontSize":13,"fontFamily":5,"textAlign":"right","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e3f5ff904","type":"arrow","x":730,"y":330,"width":100,"height":115,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1879343460,"version":1,"versionNonce":737608423,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"points":[[0,0],[100,115]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e5d5e7691","type":"arrow","x":930,"y":240,"width":0,"height":50,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":963864094,"version":1,"versionNonce":618341637,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"points":[[0,0],[0,50]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e4df25e7f","type":"text","x":942,"y":258,"width":64.35000000000001,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":2104909469,"version":1,"versionNonce":157197672,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"replicate","originalText":"replicate","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"ef1cc789","type":"arrow","x":930,"y":370,"width":0,"height":40,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1099367391,"version":1,"versionNonce":897911925,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"points":[[0,0],[0,40]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e151d7a6b","type":"text","x":942,"y":382,"width":64.35000000000001,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1625947776,"version":1,"versionNonce":734559256,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"replicate","originalText":"replicate","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e13743aab","type":"text","x":520,"y":445,"width":371.8,"height":32.5,"angle":0,"strokeColor":"#1971c2","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":2004182514,"version":1,"versionNonce":1050040258,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"each API server opens 2 connections: main + replica,\nand picks one at random for every read","originalText":"each API server opens 2 connections: main + replica,\nand picks one at random for every read","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e35fa3635","type":"text","x":520,"y":492,"width":421.85,"height":32.5,"angle":0,"strokeColor":"#0b7285","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":84196940,"version":1,"versionNonce":2065920251,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"no cache → nothing to invalidate:\nan admin write lands on main and is copied to every replica","originalText":"no cache → nothing to invalidate:\nan admin write lands on main and is copied to every replica","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e558818e9","type":"text","x":0,"y":500,"width":493.35,"height":32.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":166688708,"version":1,"versionNonce":1641903440,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"LOAD PER BOX:  frontend huge → scale out  ·  backend high → scale out\nadmin UI: one user → 1 server (+ spare)  ·  DB: read-heavy → replicas","originalText":"LOAD PER BOX:  frontend huge → scale out  ·  backend high → scale out\nadmin UI: one user → 1 server (+ spare)  ·  DB: read-heavy → replicas","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e476f06be","type":"text","x":1080,"y":78,"width":280.5,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1230563834,"version":1,"versionNonce":1694566832,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"B · Scale reads: replica or cache?","originalText":"B · Scale reads: replica or cache?","fontSize":15,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e700fa82c","type":"rectangle","x":1080,"y":110,"width":260,"height":120,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["cache"],"frameId":null,"roundness":{"type":3},"seed":1757400422,"version":1,"versionNonce":673767655,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e2b892122","type":"text","x":1094,"y":137.5,"width":257.40000000000003,"height":65.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["cache"],"frameId":null,"roundness":null,"seed":1493135432,"version":1,"versionNonce":752002366,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"Cache (Redis) — not chosen\n+ µs reads, takes load off the DB\n− every admin write must delete\n   the stale key; can serve old data","originalText":"Cache (Redis) — not chosen\n+ µs reads, takes load off the DB\n− every admin write must delete\n   the stale key; can serve old data","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4c144fe7","type":"rectangle","x":1080,"y":260,"width":260,"height":120,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#b2f2bb","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["rep"],"frameId":null,"roundness":{"type":3},"seed":1066600998,"version":1,"versionNonce":1245315470,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e66008e6f","type":"text","x":1094,"y":287.5,"width":278.85,"height":65.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["rep"],"frameId":null,"roundness":null,"seed":979693494,"version":1,"versionNonce":147667305,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"Read replicas — chosen\n+ nothing to invalidate: replication\n   carries every write to every copy\n− each replica is a DB server; ms reads","originalText":"Read replicas — chosen\n+ nothing to invalidate: replication\n   carries every write to every copy\n− each replica is a DB server; ms reads","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6b841080","type":"text","x":1080,"y":400,"width":278.85,"height":65.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":200995868,"version":1,"versionNonce":2028687212,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"Both are valid. Picked replicas because\nwrites are rare and tiny (one owner,\n100 items). Just because a cache\nexists does not mean you add it.","originalText":"Both are valid. Picked replicas because\nwrites are rare and tiny (one owner,\n100 items). Just because a cache\nexists does not mean you add it.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e228d5ec1","type":"text","x":1080,"y":480,"width":271.70000000000005,"height":48.75,"angle":0,"strokeColor":"#e03131","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1018118421,"version":1,"versionNonce":1496886435,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"Watch out: replication is async, so an\nowner may read an old row for a moment\n→ send the admin’s reads to main.","originalText":"Watch out: replication is async, so an\nowner may read an old row for a moment\n→ send the admin’s reads to main.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e851eb5a","type":"ellipse","x":423,"y":123,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge5502f08e"],"frameId":null,"roundness":null,"seed":130286598,"version":1,"versionNonce":1570152712,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e59ca7d9c","type":"text","x":432.425,"y":128,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge5502f08e"],"frameId":null,"roundness":null,"seed":664876774,"version":1,"versionNonce":1389698625,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"1","originalText":"1","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e7f1dc486","type":"ellipse","x":713,"y":233,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge49fa245a"],"frameId":null,"roundness":null,"seed":1462945690,"version":1,"versionNonce":1765070035,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e390ac1b9","type":"text","x":722.425,"y":238,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge49fa245a"],"frameId":null,"roundness":null,"seed":611164248,"version":1,"versionNonce":1538946474,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"2","originalText":"2","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e718a8945","type":"ellipse","x":1013,"y":133,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge31619d28"],"frameId":null,"roundness":null,"seed":1435920784,"version":1,"versionNonce":745188127,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e2e35784","type":"text","x":1022.425,"y":138,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge31619d28"],"frameId":null,"roundness":null,"seed":2020027419,"version":1,"versionNonce":991483082,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"3","originalText":"3","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e15829bf4","type":"ellipse","x":423,"y":343,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge2d7fd915"],"frameId":null,"roundness":null,"seed":1311939741,"version":1,"versionNonce":251461309,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e3f315506","type":"text","x":432.425,"y":348,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge2d7fd915"],"frameId":null,"roundness":null,"seed":126603649,"version":1,"versionNonce":468597630,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"4","originalText":"4","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e24ca91cd","type":"ellipse","x":1013,"y":273,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge62557561"],"frameId":null,"roundness":null,"seed":277756008,"version":1,"versionNonce":1585623284,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e1fb1d7c2","type":"text","x":1022.425,"y":278,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge62557561"],"frameId":null,"roundness":null,"seed":854478761,"version":1,"versionNonce":839558095,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"5","originalText":"5","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6f8ac159","type":"ellipse","x":1323,"y":93,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge755a3bea"],"frameId":null,"roundness":null,"seed":1066240031,"version":1,"versionNonce":173047028,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e154b7d8e","type":"text","x":1332.425,"y":98,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge755a3bea"],"frameId":null,"roundness":null,"seed":964622594,"version":1,"versionNonce":862524476,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"6","originalText":"6","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e46540c09","type":"rectangle","x":0,"y":570,"width":215,"height":131.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note1"],"frameId":null,"roundness":{"type":3},"seed":596654992,"version":1,"versionNonce":1897052333,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e1186cbc0","type":"text","x":10,"y":579,"width":214.50000000000003,"height":113.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note1"],"frameId":null,"roundness":null,"seed":1759390061,"version":1,"versionNonce":924538201,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"① Estimate, then pick\n100 items × 1 KB = 100 KB:\nfits any single node.\nStructured rows (title, price,\ncolour) → a relational DB.\nNever fancier than the data\nneeds.","originalText":"① Estimate, then pick\n100 items × 1 KB = 100 KB:\nfits any single node.\nStructured rows (title, price,\ncolour) → a relational DB.\nNever fancier than the data\nneeds.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6e970b05","type":"rectangle","x":225,"y":570,"width":215,"height":131.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note2"],"frameId":null,"roundness":{"type":3},"seed":1181587504,"version":1,"versionNonce":597904679,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e5a6b351e","type":"text","x":235,"y":579,"width":214.50000000000003,"height":97.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note2"],"frameId":null,"roundness":null,"seed":891842471,"version":1,"versionNonce":2118421926,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"② A box = LB + servers\nAny box with N stateless\nservers has a load balancer in\nfront and autoscaling behind.\nDrawing it as one box keeps\nthe picture clean.","originalText":"② A box = LB + servers\nAny box with N stateless\nservers has a load balancer in\nfront and autoscaling behind.\nDrawing it as one box keeps\nthe picture clean.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2dec36a1","type":"rectangle","x":450,"y":570,"width":215,"height":131.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note3"],"frameId":null,"roundness":{"type":3},"seed":1466136595,"version":1,"versionNonce":1898789635,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e30b24ce5","type":"text","x":460,"y":579,"width":200.20000000000002,"height":113.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note3"],"frameId":null,"roundness":null,"seed":2056712111,"version":1,"versionNonce":495535104,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"③ Three tiers\nBrowser → compute → storage.\nThe browser is the Customers\nbox; the frontend box is\nservers that send it pages.\nOnly the DB holds state, so\nonly the DB needs copies.","originalText":"③ Three tiers\nBrowser → compute → storage.\nThe browser is the Customers\nbox; the frontend box is\nservers that send it pages.\nOnly the DB holds state, so\nonly the DB needs copies.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e1351605f","type":"rectangle","x":675,"y":570,"width":215,"height":131.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note4"],"frameId":null,"roundness":{"type":3},"seed":178208278,"version":1,"versionNonce":378424697,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e135dbedf","type":"text","x":685,"y":579,"width":214.50000000000003,"height":97.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note4"],"frameId":null,"roundness":null,"seed":498123580,"version":1,"versionNonce":1414153797,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"④ Separate admin UI\nSame backend, different\nfrontend. Admin code stays out\nof the public bundle and bugs\nstay apart. Backend checks the\nrole on every write.","originalText":"④ Separate admin UI\nSame backend, different\nfrontend. Admin code stays out\nof the public bundle and bugs\nstay apart. Backend checks the\nrole on every write.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e1dddf4f6","type":"rectangle","x":900,"y":570,"width":215,"height":131.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note5"],"frameId":null,"roundness":{"type":3},"seed":25905232,"version":1,"versionNonce":1041449536,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e6a614618","type":"text","x":910,"y":579,"width":214.50000000000003,"height":113.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note5"],"frameId":null,"roundness":null,"seed":1265133104,"version":1,"versionNonce":391578344,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"⑤ Read-heavy → replicas\nCustomers only read. Add\nreplicas; each API server\nopens two connections and\npicks one per read. Main\nserves reads too — that is not\na rule.","originalText":"⑤ Read-heavy → replicas\nCustomers only read. Add\nreplicas; each API server\nopens two connections and\npicks one per read. Main\nserves reads too — that is not\na rule.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e21a1ae63","type":"rectangle","x":1125,"y":570,"width":215,"height":131.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note6"],"frameId":null,"roundness":{"type":3},"seed":605441631,"version":1,"versionNonce":8790957,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false},{"id":"e12a58628","type":"text","x":1135,"y":579,"width":214.50000000000003,"height":97.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note6"],"frameId":null,"roundness":null,"seed":899680760,"version":1,"versionNonce":1148025345,"isDeleted":false,"boundElements":[],"updated":1792336271693,"link":null,"locked":false,"text":"⑥ Replica vs cache\nBoth scale reads. Replica: no\ninvalidation, slower, costs a\nDB server. Cache: faster and\ncheaper per read, but you must\ndelete keys on every write.","originalText":"⑥ Replica vs cache\nBoth scale reads. Replica: no\ninvalidation, slower, costs a\nDB server. Cache: faster and\ncheaper per read, but you must\ndelete keys on every write.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true}]}</script>
+  </section>
+
+  <!-- 1 -->
+  <section id="problem" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">1</span>
+      <div>
+        <h2>The problem, and why it is kept small</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 0:00</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>A small shop owner has about a hundred items and wants them listed on a website. Hundreds of thousands of people will visit. That is the whole brief.</p>
+      <p>The lesson is explicit about its <span class="term">motive</span>: every design has one, and here it is to practise a structured approach. Small steps, not big leaps. Each piece of infrastructure gets added only when something forces it, so you learn what each piece is <em>for</em>.</p>
+      <h3>Features <span class="ts">▶ 0:57</span></h3>
+    </div>
+    <div class="grid-2">
+      <div class="card amber">
+        <span class="k">Shop owner</span>
+        <h3>Manage the catalog</h3>
+        <ul>
+          <li>Add a new product</li>
+          <li>Update or delete an existing product</li>
+          <li>List all products</li>
+        </ul>
+      </div>
+      <div class="card teal">
+        <span class="k">Customer</span>
+        <h3>Browse the catalog</h3>
+        <ul>
+          <li>Open the site and see the products</li>
+          <li>Read only, nothing is written</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout key">
+      <span class="cap">Out of scope, on purpose</span>
+      <p>No payments, no cart, no orders. The lesson says later why it drew the line here: with no customer writes, the traffic is almost purely <strong>read-heavy</strong>, and that one property drives the biggest decision in the design.</p>
+    </div>
+  </section>
+
+  <!-- 2 -->
+  <section id="storage" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">2</span>
+      <div>
+        <h2>Storage: estimate, then pick</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 1:20</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson starts with storage because it is the easiest piece to reason about. “The data is small and fits on a single node” is a general statement; the lesson insists on backing it with a number.</p>
+    </div>
+    <div class="panel" style="max-width:70ch">
+      <p style="margin:0;font-family:'IBM Plex Mono',monospace;font-size:.95rem;line-height:1.9">
+        one product (title, description, colour, …) ≈ <strong>1 KB</strong><br>
+        100 products × 1 KB = <strong>100 KB</strong><br>
+        <span style="color:var(--muted)">→ fits on the smallest database server you can rent</span>
+      </p>
+    </div>
+    <div class="prose">
+      <h3>Which database? <span class="ts">▶ 2:12</span></h3>
+      <p>When data is this small, almost any database would work and the choice would not matter much. So decide on <em>shape</em>, not size. A product has a clear structure: title, description, colours, a price, maybe a few reviews. Structured rows with a fixed schema are what a relational (SQL) database is for, and there is no reason to go for anything fancier.</p>
+    </div>
+    <div class="callout key">
+      <span class="cap">Decision 1</span>
+      <p>A relational database with a products table. Justified by the size (tiny) and the shape (structured). Section 7.2 writes the actual schema.</p>
+    </div>
+  </section>
+
+  <!-- 3 -->
+  <section id="access" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">3</span>
+      <div>
+        <h2>Access: HTTP, API servers, a load balancer</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 2:56</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The catalog is reached over the internet, so the protocol is HTTP: every browser, phone and client library speaks it (lesson 21). So: an HTTP server that exposes a few APIs over the database.</p>
+      <p>One server may not handle the traffic of a popular listing, so run several. The moment you have more than one server you need a <span class="term">load balancer</span>: the single address every client talks to, which spreads requests across the servers. Give it a domain name, say <code>api.mystore.com</code>.</p>
+      <p>What you have now is the <span class="term">three-tier architecture</span>: users, compute, storage.</p>
+    </div>
+
+    <div class="grid-2">
+      <figure style="margin:0">
+        <p class="cap">Drawn in full · users, load balancer, servers, database</p>
+        <svg class="dia" viewBox="0 0 340 190" role="img" aria-label="Users reach a load balancer, which spreads requests over three API servers, which all read the one database.">
+          <path class="wire" d="M66 95H96" marker-end="url(#ah)"/>
+          <path class="wire" d="M160 95C180 95 180 45 196 45" marker-end="url(#ah)"/>
+          <path class="wire" d="M160 95H196" marker-end="url(#ah)"/>
+          <path class="wire" d="M160 95C180 95 180 145 196 145" marker-end="url(#ah)"/>
+          <path class="wire" d="M270 45C285 45 285 95 300 95" marker-end="url(#ah)"/>
+          <path class="wire" d="M270 95H300" marker-end="url(#ah)"/>
+          <path class="wire" d="M270 145C285 145 285 95 300 95" marker-end="url(#ah)"/>
+          <rect class="node" x="10" y="75" width="56" height="40" rx="10"/><text x="38" y="100" text-anchor="middle">Users</text>
+          <rect class="node" x="96" y="75" width="64" height="40" rx="10"/><text x="128" y="96" text-anchor="middle" class="t-sm">Load</text><text x="128" y="108" text-anchor="middle" class="t-sm">balancer</text>
+          <rect class="node copy" x="196" y="28" width="74" height="34" rx="8"/><text x="233" y="50" text-anchor="middle" class="t-sm">API server</text>
+          <rect class="node copy" x="196" y="78" width="74" height="34" rx="8"/><text x="233" y="100" text-anchor="middle" class="t-sm">API server</text>
+          <rect class="node copy" x="196" y="128" width="74" height="34" rx="8"/><text x="233" y="150" text-anchor="middle" class="t-sm">API server</text>
+          <rect class="node main" x="300" y="75" width="36" height="40" rx="8"/><text x="318" y="100" text-anchor="middle" class="t-sm">DB</text>
+          <text x="170" y="182" text-anchor="middle" class="t-muted">api.mystore.com</text>
+        </svg>
+      </figure>
+      <figure style="margin:0">
+        <p class="cap">Drawn as the lesson will from now on · one box per service</p>
+        <svg class="dia" viewBox="0 0 340 190" role="img" aria-label="The same system drawn as one service box called catalog backend, which stands for a load balancer plus servers, next to the catalog database.">
+          <path class="wire" d="M66 95H96" marker-end="url(#ah)"/>
+          <path class="wire" d="M236 95H270" marker-end="url(#ah)"/>
+          <rect class="node" x="10" y="75" width="56" height="40" rx="10"/><text x="38" y="100" text-anchor="middle">Users</text>
+          <rect class="svc" x="96" y="55" width="140" height="80" rx="12"/>
+          <text x="166" y="82" text-anchor="middle" class="t-b">Catalog backend</text>
+          <text x="166" y="100" text-anchor="middle" class="t-sm t-muted">⚖ LB + N servers</text>
+          <text x="166" y="116" text-anchor="middle" class="t-sm t-muted">stateless · autoscaled</text>
+          <rect class="node main" x="270" y="70" width="60" height="50" rx="10"/><text x="300" y="92" text-anchor="middle" class="t-sm">Catalog</text><text x="300" y="106" text-anchor="middle" class="t-sm">DB</text>
+          <text x="170" y="170" text-anchor="middle" class="t-teal">the load balancer is implied, not drawn</text>
+        </svg>
+        <figcaption>From here the lesson draws a service as one box. A load balancer is in almost every system, so drawing it each time only makes the picture messy. Whenever you see a service box, read “load balancer plus several stateless servers”.</figcaption>
+      </figure>
+    </div>
+
+    <div class="prose">
+      <p>Name the pieces: the <strong>catalog backend service</strong> (the APIs) and the <strong>catalog database</strong> (the data). Two boxes. That is the whole system so far.</p>
+    </div>
+  </section>
+
+  <!-- 4 -->
+  <section id="frontends" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">4</span>
+      <div>
+        <h2>A frontend for customers, an admin UI for the owner</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 5:40</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>Customers do not make JSON calls. They need pages. So add a <strong>catalog frontend</strong> service: the customer talks to the frontend, the frontend calls the backend’s APIs, the backend reads the database. The classic way to build an application.</p>
+      <p>The owner needs something different: a place to add products and edit titles and descriptions. That is a second frontend, the <strong>admin UI</strong>. It calls the <em>same</em> backend, using the create, update and delete APIs.</p>
+    </div>
+
+    <div class="callout key">
+      <p><strong>Where is the browser?</strong> It is the <em>Customers</em> box, and the owner box is their browser too. The word “frontend” trips people up here: in this drawing, <em>catalog frontend</em> is not the browser. It is a set of servers behind a load balancer whose only job is to hand pages to the browser. The chain is browser → frontend servers → backend API → database.</p>
+      <p>The lesson draws the classic style, where the frontend server builds the page and calls the backend itself. In a React-style app the frontend servers hand over the JS bundle once, and after that the browser calls the backend API directly. Same boxes, one extra arrow from the browser to the backend, and the frontend box shrinks to a static-file host or CDN.</p>
+    </div>
+
+    <figure>
+      <p class="cap">Two front ends, one backend, one database</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 250" role="img" aria-label="Customers use the catalog frontend service and the shop owner uses the admin UI service. Both call the catalog backend service. The backend reads and writes the catalog database and checks the admin role on writes.">
+          <path class="wire" d="M106 70H150" marker-end="url(#ah)"/>
+          <path class="wire" d="M106 180H150" marker-end="url(#ah)"/>
+          <path class="wire teal" d="M300 70C340 70 340 110 380 110" marker-end="url(#ah-teal)"/>
+          <path class="wire accent" d="M300 180C340 180 340 140 380 140" marker-end="url(#ah-accent)"/>
+          <path class="wire" d="M540 125H600" marker-end="url(#ah)"/>
+          <text x="340" y="60" text-anchor="middle" class="t-mono t-teal">GET</text>
+          <text x="330" y="224" text-anchor="middle" class="t-mono t-accent">POST · PUT · DELETE</text>
+          <text x="570" y="115" text-anchor="middle" class="t-mono t-muted">SQL</text>
+
+          <rect class="node" x="16" y="44" width="90" height="52" rx="10"/><text x="61" y="66" text-anchor="middle">Customers</text><text x="61" y="84" text-anchor="middle" class="t-sm t-muted">browser</text>
+          <rect class="node" x="16" y="154" width="90" height="52" rx="10"/><text x="61" y="176" text-anchor="middle">Shop owner</text><text x="61" y="194" text-anchor="middle" class="t-sm t-muted">browser</text>
+          <rect class="svc" x="150" y="40" width="150" height="60" rx="12"/><text x="225" y="65" text-anchor="middle" class="t-b">Catalog frontend</text><text x="225" y="84" text-anchor="middle" class="t-sm t-muted">pages for customers</text>
+          <rect class="svc" x="150" y="150" width="150" height="60" rx="12"/><text x="225" y="175" text-anchor="middle" class="t-b">Admin UI</text><text x="225" y="194" text-anchor="middle" class="t-sm t-muted">pages for the owner</text>
+          <rect class="svc" x="380" y="85" width="160" height="80" rx="12"/><text x="460" y="112" text-anchor="middle" class="t-b">Catalog backend</text><text x="460" y="131" text-anchor="middle" class="t-sm t-muted">one API for both</text><text x="460" y="150" text-anchor="middle" class="t-sm t-red">is this user admin?</text>
+          <rect class="node main" x="600" y="95" width="130" height="60" rx="10"/><text x="665" y="120" text-anchor="middle" class="t-b">Catalog DB</text><text x="665" y="139" text-anchor="middle" class="t-sm t-muted">products</text>
+          <text x="380" y="238" text-anchor="middle" class="t-muted">one backend, two front ends: the UIs differ, the data does not</text>
+        </svg>
+      </div>
+    </figure>
+
+    <div class="prose">
+      <h3>Why a separate admin UI? <span class="ts">▶ 7:02</span></h3>
+      <p>Both are “just frontends”, and an early startup often ships them as one app. The lesson still separates them, for two reasons:</p>
+      <ul>
+        <li><strong>Different jobs, different code.</strong> The admin screens look nothing like the shop. If the two code bases tangle, a bug in one breaks the other.</li>
+        <li><strong>Admin is a superpower.</strong> If the admin screens ship inside the public frontend, anyone can read that code, find the admin API calls, and start poking at them. Keeping the admin frontend separate keeps it out of every customer’s browser.</li>
+      </ul>
+      <p>A common backend is fine. The rule there is simple: <strong>on every API call, check whether the caller has admin privileges.</strong> If yes, writes are allowed. If not, reads only.</p>
+    </div>
+  </section>
+
+  <!-- 5 -->
+  <section id="load" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">5</span>
+      <div>
+        <h2>Load on each piece</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 8:32</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>Four components now: frontend, admin UI, backend, database. The lesson walks them one by one and asks of each: how much traffic, and what do we do about it?</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>Component</th><th>Who hits it</th><th>Load</th><th>What to do</th></tr></thead>
+        <tbody>
+          <tr><th>Catalog frontend</th><td>every visitor</td><td>huge in the worst case</td><td>stateless servers behind a load balancer; add servers as load grows. Easy.</td></tr>
+          <tr><th>Admin UI</th><td>the one shop owner</td><td>tiny</td><td>one server is enough. For availability, a load balancer with one server and a rule that keeps it at one.</td></tr>
+          <tr><th>Catalog backend</th><td>both front ends</td><td>high</td><td>same as the frontend: stateless, load balanced, autoscaled on request count.</td></tr>
+          <tr><th>Catalog database</th><td>the backend</td><td>high, and almost all reads</td><td>this is the interesting one. Section 6.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <h3>Autoscaling does the adding for you <span class="ts">▶ 10:05</span></h3>
+      <p>Every cloud has a way to say “behind this load balancer there must always be at least N healthy servers, and up to M when busy”. In AWS that is a <span class="term">target group</span> with an autoscaling policy. If a server dies, a new one is started without anyone being paged. For the admin UI, N is 1: the cloud guarantees one server is always up. For the frontend and backend, the policy scales on incoming requests.</p>
+      <p>This is the practical form of lessons 19 and 20: stateless servers are replaceable, and the replacing is automated.</p>
+    </div>
+  </section>
+
+  <!-- 6 -->
+  <section id="reads" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">6</span>
+      <div>
+        <h2>Scaling the database: replicas, not a cache</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 11:18</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>There are no payments, so no customer ever writes. The only writes come from one owner editing a hundred items: a few per day. Everything else is reads. The lesson chose the constraint to make this obvious: <strong>the traffic is read-heavy.</strong></p>
+      <p>If one database cannot keep up with the reads, add a <span class="term">read replica</span>: a second database that receives a copy of every write and can serve reads. Then change the backend so it sends some reads to the main and some to the replica.</p>
+      <h3>Busting a myth <span class="ts">▶ 12:26</span></h3>
+      <p>“But the main only handles writes!” No. That is not a rule. The main can serve reads as well, as long as that fits your system. Here the writes are minuscule, so the main has plenty of room to serve reads too. Main: reads and writes. Replica: reads.</p>
+      <h3>How the backend spreads reads <span class="ts">▶ 13:49</span></h3>
+      <p>Every API server opens <strong>two database connections</strong> when it starts: one to the main, one to the replica. For each read it picks one of the two, at random. Writes always use the main connection. Need more read capacity? Add a third database and a third connection. Nothing stops you.</p>
+    </div>
+
+    <figure>
+      <p class="cap">Reads spread over main and replicas; writes go to main and replicate</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 250" role="img" aria-label="The catalog backend holds a connection to the main database and one to each read replica. Reads are sent to any of them at random; writes go only to the main, which replicates them to the replicas.">
+          <path class="wire accent" d="M250 95C320 95 330 60 400 60" marker-end="url(#ah-accent)"/>
+          <path class="wire teal" d="M250 110C320 110 330 70 400 70" marker-end="url(#ah-teal)"/>
+          <path class="wire teal" d="M250 125C320 125 340 130 400 130" marker-end="url(#ah-teal)"/>
+          <path class="wire teal dash" d="M250 140C320 140 330 200 400 200" marker-end="url(#ah-teal)"/>
+          <path class="wire dash" d="M470 90V110" marker-end="url(#ah)"/>
+          <path class="wire dash" d="M470 160V180" marker-end="url(#ah)"/>
+          <text x="325" y="52" text-anchor="middle" class="t-mono t-accent">writes</text>
+          <text x="520" y="104" text-anchor="start" class="t-mono t-muted">replicate</text>
+          <text x="520" y="174" text-anchor="start" class="t-mono t-muted">replicate</text>
+
+          <rect class="svc" x="60" y="70" width="190" height="90" rx="12"/>
+          <text x="155" y="96" text-anchor="middle" class="t-b">Catalog backend</text>
+          <text x="155" y="116" text-anchor="middle" class="t-sm t-muted">conn 1 → main</text>
+          <text x="155" y="132" text-anchor="middle" class="t-sm t-muted">conn 2 → replica 1</text>
+          <text x="155" y="148" text-anchor="middle" class="t-sm t-muted">conn 3 → replica 2 …</text>
+          <rect class="node main" x="400" y="40" width="140" height="50" rx="10"/><text x="470" y="60" text-anchor="middle" class="t-b">Main</text><text x="470" y="78" text-anchor="middle" class="t-sm t-muted">reads + writes</text>
+          <rect class="node copy" x="400" y="110" width="140" height="50" rx="10"/><text x="470" y="130" text-anchor="middle" class="t-b">Replica 1</text><text x="470" y="148" text-anchor="middle" class="t-sm t-muted">reads</text>
+          <rect class="node ghost" x="400" y="180" width="140" height="50" rx="10"/><text x="470" y="200" text-anchor="middle" class="t-muted">Replica 2</text><text x="470" y="218" text-anchor="middle" class="t-sm t-muted">add when needed</text>
+          <text x="650" y="60" text-anchor="middle" class="t-teal">no cache</text>
+          <text x="650" y="80" text-anchor="middle" class="t-teal">→ nothing to</text>
+          <text x="650" y="100" text-anchor="middle" class="t-teal">invalidate</text>
+          <text x="650" y="124" text-anchor="middle" class="t-sm t-teal">green = reads, picked at random</text>
+          <text x="650" y="150" text-anchor="middle" class="t-sm t-muted">an admin edit lands on</text>
+          <text x="650" y="166" text-anchor="middle" class="t-sm t-muted">main and is copied to</text>
+          <text x="650" y="182" text-anchor="middle" class="t-sm t-muted">every replica by itself</text>
+        </svg>
+      </div>
+    </figure>
+
+    <div class="prose">
+      <h3>“Why not just add a cache?” <span class="ts">▶ 15:20</span></h3>
+      <p>You could. There is nothing wrong with a cache in front of the database, and it is the more common answer. The lesson chose replicas on purpose, and gives its reason:</p>
+    </div>
+    <div class="grid-2">
+      <div class="card red">
+        <span class="k">With a cache</span>
+        <h3>You own invalidation</h3>
+        <p>The cache holds a copy of a product. The owner edits that product. Now the cache is wrong, and <em>your code</em> must delete or update that key on every write, or customers see stale data.</p>
+      </div>
+      <div class="card teal">
+        <span class="k">With replicas</span>
+        <h3>Replication does it for you</h3>
+        <p>The owner’s write lands on the main and is copied to every replica by the database itself. No key to delete, no stale copy to think about. Reads still scale: add replicas as needed.</p>
+      </div>
+    </div>
+    <div class="callout key">
+      <span class="cap">The lesson’s real point <span class="ts">▶ 16:34</span></span>
+      <p>Every box got a justification. Two options were on the table to scale reads; one was chosen for a stated reason that fits <em>this</em> system (rare, tiny writes). “Just because a cache exists does not mean you add it.” That habit, a reason for every box, is what the interviewer is grading.</p>
+    </div>
+  </section>
+
+  <!-- 7 -->
+  <section id="deeper" class="extra">
+    <div class="sec-head">
+      <span class="sec-num">7</span>
+      <div>
+        <h2>Going deeper</h2>
+        <div class="sec-meta"><span class="badge">Extra depth · not in the video</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson does the storage estimate but not the traffic one, names the APIs but does not write them, and skips the one thing that bites every read-replica setup. Here is the rest, in the order of the 7-step route.</p>
+
+      <h3>7.1 · The traffic estimate the lesson skipped</h3>
+      <p>“Hundreds of thousands of visitors” is not a number yet. Pick one and say your assumption out loud:</p>
+    </div>
+    <div class="panel" style="max-width:70ch">
+      <p style="margin:0;font-family:'IBM Plex Mono',monospace;font-size:.92rem;line-height:1.9">
+        200,000 visitors/day × 10 pages each = 2M page views/day<br>
+        each page = 1 HTML + 3 API calls (list, categories, shop info) = 4 requests<br>
+        2M page views × 4 = <strong>8M requests/day</strong><br>
+        8M ÷ 86,400 s ≈ <strong>95 requests/s</strong> average · peak 3× ≈ <strong>300/s</strong><br>
+        API calls = 2M × 3 = 6M/day; categories and shop info rarely change, so not every call reads the DB → 2–3M DB reads/day ≈ <strong>30/s</strong>
+      </p>
+    </div>
+    <div class="prose">
+      <p>Every number here is an assumption, and that is fine. 10 pages per visit and 3 API calls per page are guesses you say out loud; the interviewer can swap them and the arithmetic still works.</p>
+    </div>
+    <div class="prose">
+      <p>Now the honest conclusion: a single modest API server handles a few thousand simple requests per second, and a single database handles tens of thousands of simple reads per second. <strong>At this scale one of each would do.</strong> The lesson over-provisions on purpose, to show you the pieces. What you should take from it is the <em>order</em> in which you add them as traffic grows, and roughly when:</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>Traffic</th><th>Compute</th><th>Data</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><th>up to ~1,000 req/s</th><td>2 small API servers behind a load balancer</td><td>1 database + 1 standby</td><td>the second server and the standby are for <em>availability</em>, not load (lesson 19)</td></tr>
+          <tr><th>~1,000 – 10,000 req/s</th><td>autoscaling group</td><td>main + 1–2 read replicas; images on S3 behind a CDN</td><td>reads outgrow one database; images are most of the bytes (lesson 22)</td></tr>
+          <tr><th>~10,000 – 100,000 req/s</th><td>autoscaling, many servers</td><td>cache (Redis) for product reads; CDN caching of the listing itself with a short TTL</td><td>replicas cost a database server each; a cache serves a read for a fraction of the cost</td></tr>
+          <tr><th>beyond</th><td>split by shop</td><td>shard the database by shop (lesson 24); search in a separate index</td><td>one database can no longer hold or serve the whole catalog</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="prose">
+      <h3>7.2 · The schema (the lesson’s exercise asks you to write it)</h3>
+<pre><code>CREATE TABLE products (
+  id           BIGSERIAL PRIMARY KEY,
+  title        TEXT        NOT NULL,
+  description  TEXT,
+  color        TEXT,
+  price_cents  INTEGER     NOT NULL CHECK (price_cents &gt;= 0),  <span class="c">-- never store money as a float</span>
+  currency     CHAR(3)     NOT NULL DEFAULT 'INR',
+  stock        INTEGER     NOT NULL DEFAULT 0,
+  status       TEXT        NOT NULL DEFAULT 'active',           <span class="c">-- active | hidden | deleted</span>
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE product_images (
+  product_id   BIGINT   NOT NULL REFERENCES products(id),
+  position     SMALLINT NOT NULL,
+  url          TEXT     NOT NULL,                                <span class="c">-- an S3 key served through the CDN (lesson 22)</span>
+  PRIMARY KEY (product_id, position)
+);
+
+CREATE INDEX products_listing_idx ON products (status, id);     <span class="c">-- the listing query: WHERE status='active' ORDER BY id</span></code></pre>
+      <ul>
+        <li><strong>Soft delete.</strong> “Delete” sets <code>status = 'deleted'</code>. The owner can undo it, and old orders (when you add them) still point at a real row.</li>
+        <li><strong>Images are not in the database.</strong> They are bytes; bytes go to blob storage. The table keeps the key. This is the single biggest thing the lesson leaves out, because images will be 99% of the bandwidth of a shop.</li>
+        <li><strong>One index</strong>, for the one query customers run. Do not index what you do not query.</li>
+      </ul>
+
+      <h3>7.3 · The API</h3>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>Endpoint</th><th>Who</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><th><code>GET /products?limit=20&amp;cursor=…</code></th><td>anyone</td><td>the listing. Cursor pagination (“rows after id 40”) rather than page numbers: it stays fast and does not skip or repeat rows when the owner edits mid-scroll.</td></tr>
+          <tr><th><code>GET /products/{id}</code></th><td>anyone</td><td>one product with its images.</td></tr>
+          <tr><th><code>POST /products</code></th><td>admin</td><td>create. Body is validated (price ≥ 0, title non-empty).</td></tr>
+          <tr><th><code>PUT /products/{id}</code></th><td>admin</td><td>update. Bumps <code>updated_at</code>.</td></tr>
+          <tr><th><code>DELETE /products/{id}</code></th><td>admin</td><td>soft delete.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>“Admin” is a role carried in the owner’s login token (a signed JWT or a server-side session). One middleware in the backend checks it before any write handler runs. The frontend never decides who is admin; it only shows or hides buttons.</p>
+
+      <h3>7.4 · The catch with replicas: replication lag</h3>
+      <p>Replication is usually <span class="term">asynchronous</span>: the main confirms the write, then ships it to the replicas a moment later. Usually that moment is milliseconds. Under load it can be seconds. During that moment the replica is <em>behind</em>, and a read that lands on it returns the old row.</p>
+      <p>For customers that is harmless: a title that is a second old is still a title. For the owner it is a bug report: they hit Save, the page reloads, and the old title is still there, because that read happened to go to the replica. The lab in section 8 reproduces this exactly.</p>
+    </div>
+
+    <figure>
+      <p class="cap">Replication lag: the owner reads their own write from a replica that has not caught up</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 200" role="img" aria-label="A timeline. The owner saves a title on the main. A moment later the owner's page reloads and the read goes to the replica, which still has the old title. Only after replication catches up do both databases agree.">
+          <path class="tl" d="M60 70H720"/>
+          <path class="tl" d="M60 130H720"/>
+          <text x="20" y="74" text-anchor="start" class="t-b">main</text>
+          <text x="20" y="134" text-anchor="start" class="t-b">replica</text>
+          <circle class="node main" cx="200" cy="70" r="9"/>
+          <text x="200" y="48" text-anchor="middle" class="t-mono t-accent">t = 0 · PUT title = “SALE”</text>
+          <path class="wire accent dash" d="M200 80C260 100 400 100 460 121" marker-end="url(#ah-accent)"/>
+          <text x="316" y="124" text-anchor="end" class="t-sm t-muted">replication · lag</text>
+          <circle class="node copy" cx="460" cy="130" r="9"/>
+          <text x="460" y="162" text-anchor="middle" class="t-mono t-teal">t = +0.8 s · replica has “SALE”</text>
+          <circle class="node dead" cx="330" cy="130" r="9"/>
+          <text x="330" y="185" text-anchor="middle" class="t-mono t-red">t = +0.3 s · owner reloads → reads replica → still old title</text>
+          <circle class="node" cx="620" cy="70" r="9"/><circle class="node" cx="620" cy="130" r="9"/>
+          <text x="620" y="48" text-anchor="middle" class="t-sm t-muted">after this, any read is fine</text>
+        </svg>
+      </div>
+    </figure>
+
+    <div class="prose"><p>Three standard fixes, cheapest first:</p></div>
+    <div class="grid-3">
+      <div class="card teal">
+        <span class="k">Fix 1 · route by caller</span>
+        <h3>Admin reads main</h3>
+        <p>Requests carrying the admin role use the main connection for reads too. The owner always sees their own writes; customers keep using replicas. One <code>if</code> in the backend.</p>
+      </div>
+      <div class="card">
+        <span class="k">Fix 2 · route by recency</span>
+        <h3>Read main after a write</h3>
+        <p>After any write, send that user’s reads to the main for a few seconds (store a timestamp in their session). Called <em>read-your-writes</em>. Works when customers also write.</p>
+      </div>
+      <div class="card amber">
+        <span class="k">Fix 3 · change replication</span>
+        <h3>Synchronous replica</h3>
+        <p>The main waits for the replica to confirm before answering. No lag, but every write is slower and a slow replica slows the main. Usually overkill for a catalog.</p>
+      </div>
+    </div>
+
+    <div class="prose">
+      <h3>7.5 · Replica vs cache, the full comparison</h3>
+      <p>The lesson gives one reason (invalidation). An interviewer will want the whole trade.</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th></th><th>Read replicas</th><th>Cache (Redis)</th></tr></thead>
+        <tbody>
+          <tr><th>Freshness</th><td>automatic: replication carries every write. Lag of ms–s.</td><td>your job: delete or update the key on every write, or accept a TTL’s worth of staleness.</td></tr>
+          <tr><th>Speed per read</th><td>a normal database query, ~1–5 ms.</td><td>~0.2 ms, and no SQL work at all.</td></tr>
+          <tr><th>Cost per read</th><td>a database server per replica; a replica holds <em>all</em> the data even if 1% is hot.</td><td>cheap; holds only the hot 1%. One Redis node absorbs what would take many replicas.</td></tr>
+          <tr><th>Failure</th><td>a replica dies → the others carry on, slightly busier.</td><td>the cache dies → every read hits the database at once (a “thundering herd”). Needs warming and care.</td></tr>
+          <tr><th>Can do</th><td>any query, including ones nobody thought to cache.</td><td>only what was cached, keyed exactly.</td></tr>
+          <tr><th>Pick it when</th><td>writes are rare and small, reads are varied, data is small, you want correctness with no extra code. <strong>This lesson.</strong></td><td>reads are enormous and repetitive (the same 1,000 hot products), latency matters, you can handle invalidation.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>They also combine. Many shops run <em>both</em>: a cache for the hottest reads, replicas behind it for everything else and for availability. And a CDN in front of all of it for the images and, with a short TTL, the listing page itself.</p>
+
+      <h3>7.6 · How this design grows</h3>
+      <p>Each line is a question the interviewer may ask next, and the box it adds.</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>When</th><th>Add</th><th>Lesson</th></tr></thead>
+        <tbody>
+          <tr><th>Products get photos</th><td>S3 for the bytes, a CDN in front, the key in <code>product_images</code>. Owner uploads straight to S3 with a pre-signed URL.</td><td>22</td></tr>
+          <tr><th>The main database dies</th><td>a standby that is promoted (failover). A read replica can double as the standby.</td><td>19</td></tr>
+          <tr><th>Owner sees stale data after editing</th><td>route the admin’s reads to the main (7.4).</td><td>—</td></tr>
+          <tr><th>Reads outgrow a few replicas</th><td>Redis cache for product reads, invalidated on write; CDN caching of the listing JSON with a 30–60 s TTL.</td><td>—</td></tr>
+          <tr><th>Customers want a search box</th><td>Postgres full-text search first; a dedicated search index (Elasticsearch) when that is not enough.</td><td>—</td></tr>
+          <tr><th>10,000 shops instead of one</th><td>a <code>shop_id</code> column on everything, indexed. When one database is not enough, shard by <code>shop_id</code> on a hash ring.</td><td>24</td></tr>
+          <tr><th>Payments and orders</th><td>a separate service with its own database: write-heavy, needs transactions, must never be stale. Do not bolt it onto the catalog database.</td><td>—</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="prose">
+      <h3>7.7 · Limits worth saying out loud</h3>
+      <ul>
+        <li><strong>One region.</strong> Everything sits in one data centre. A regional outage takes the shop down. Backups in a second region first; a second deployment later.</li>
+        <li><strong>The main is still a single point of failure</strong> until a standby and failover exist. Replicas scale reads; they do not by themselves make writes available.</li>
+        <li><strong>Replicas are eventually consistent.</strong> Fine for a catalog, wrong for stock counts and payments.</li>
+        <li><strong>“Autoscaling” scales stateless servers only.</strong> Nothing autoscales the database; that is the part you design by hand, which is why the lesson spends its last eight minutes there.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 8 -->
+  <section id="lab" class="lab">
+    <div class="sec-head">
+      <span class="sec-num">8</span>
+      <div>
+        <h2>Hands-on lab</h2>
+        <div class="sec-meta"><span class="badge">Exercise from the video</span><span class="ts">▶ 17:34 · code added here</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson’s exercise: design the table, stuff it with 100 generated products, write a backend with two database connections that alternates reads between main and replica, set up replication, change one row on the main and watch it appear on the replica. Then, as a stretch, add a cache and feel the invalidation problem.</p>
+      <p>Below is a version you can run in ten seconds with nothing installed: two SQLite files play main and replica, and a tiny background thread plays the replication, with a deliberate half-second lag so you can see it. Step 4 has the real-Postgres version.</p>
+    </div>
+
+    <ol class="step-list">
+      <li>
+        <b>Save this as <code>catalog.py</code></b>
+        <p>Schema, 100 generated products, an asynchronous replicator, and a backend that holds two connections and picks one at random per read.</p>
+<pre><code>import random, sqlite3, threading, time
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS products (
+  id          INTEGER PRIMARY KEY,
+  title       TEXT NOT NULL,
+  description TEXT,
+  color       TEXT,
+  price_cents INTEGER NOT NULL,
+  stock       INTEGER NOT NULL DEFAULT 0,
+  updated_at  REAL NOT NULL          <span class="c">-- used by the replicator to find changed rows</span>
+);"""
+
+def connect(path):
+    c = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+    c.execute(SCHEMA)
+    return c
+
+main, replica = connect("main.db"), connect("replica.db")
+
+<span class="c"># --- the shop owner's 100 items --------------------------------------------</span>
+random.seed(26)
+nouns, colors = ["Mug", "Lamp", "Scarf", "Notebook", "Bottle", "Chair", "Poster", "Candle"], ["red", "blue", "green", "black"]
+main.execute("DELETE FROM products")
+for i in range(1, 101):
+    main.execute("INSERT INTO products VALUES (?,?,?,?,?,?,?)",
+                 (i, f"{random.choice(colors).title()} {random.choice(nouns)} #{i}", "lorem ipsum " * 40,
+                  random.choice(colors), random.randint(199, 9999), random.randint(0, 50), time.time()))
+
+<span class="c"># --- an asynchronous replica: copies changed rows from main every 0.5 s -----</span>
+def replicate_forever(lag=0.5):
+    seen = 0.0
+    while True:
+        rows = main.execute("SELECT * FROM products WHERE updated_at &gt; ?", (seen,)).fetchall()
+        for r in rows:
+            replica.execute("INSERT OR REPLACE INTO products VALUES (?,?,?,?,?,?,?)", r)
+            seen = max(seen, r[6])
+        time.sleep(lag)
+threading.Thread(target=replicate_forever, daemon=True).start()
+time.sleep(1)   <span class="c"># let the first copy land</span>
+
+<span class="c"># --- the backend: two connections, reads spread at random, writes to main ---</span>
+class Backend:
+    def __init__(self):
+        self.pool = {"main": main, "replica": replica}
+        self.reads = {"main": 0, "replica": 0}
+    def get_product(self, pid):
+        name = random.choice(list(self.pool))                 <span class="c"># the lesson's "pick one at random"</span>
+        self.reads[name] += 1
+        return self.pool[name].execute("SELECT title FROM products WHERE id=?", (pid,)).fetchone()[0]
+    def list_products(self):
+        return self.pool["replica"].execute("SELECT id, title, price_cents FROM products ORDER BY id LIMIT 3").fetchall()
+    def update_title(self, pid, title):                       <span class="c"># admin only; always the main</span>
+        main.execute("UPDATE products SET title=?, updated_at=? WHERE id=?", (title, time.time(), pid))
+
+api = Backend()
+print("first 3 products (from replica):", api.list_products())
+for _ in range(1000):
+    api.get_product(random.randint(1, 100))
+print("1000 reads spread over:", api.reads)
+
+api.update_title(7, "Blue Mug #7 — SALE")
+print("right after the admin write:   main =", main.execute("SELECT title FROM products WHERE id=7").fetchone()[0],
+      "| replica =", replica.execute("SELECT title FROM products WHERE id=7").fetchone()[0])
+time.sleep(1)
+print("one second later:              main =", main.execute("SELECT title FROM products WHERE id=7").fetchone()[0],
+      "| replica =", replica.execute("SELECT title FROM products WHERE id=7").fetchone()[0])</code></pre>
+      </li>
+      <li>
+        <b>Run it</b>
+<pre><code>python3 catalog.py</code></pre>
+<pre><code><span class="o">first 3 products (from replica): [(1, 'Blue Notebook #1', 9112), (2, 'Blue Candle #2', 8435), (3, 'Black Notebook #3', 3507)]
+1000 reads spread over: {'main': 486, 'replica': 514}
+right after the admin write:   main = Blue Mug #7 — SALE | replica = Red Mug #7
+one second later:              main = Blue Mug #7 — SALE | replica = Blue Mug #7 — SALE</span></code></pre>
+      </li>
+      <li>
+        <b>Read the four lines</b>
+        <p>Reads split roughly half and half with no code beyond <code>random.choice</code>. The admin write went to the main only. Immediately after it, the replica still had the <em>old</em> title: that is replication lag (section 7.4), and a customer reading at that instant would see “Red Mug”. One second later both agree, and nobody invalidated anything.</p>
+      </li>
+      <li>
+        <b>The real thing: Postgres main + replica in Docker</b>
+        <p>The lesson wants a real replication setup. These Bitnami images do streaming replication from two environment variables. (Not run on this machine; the commands are the documented ones.)</p>
+<pre><code><span class="c"># docker-compose.yml</span>
+services:
+  main:
+    image: bitnami/postgresql:16
+    ports: ["5432:5432"]
+    environment:
+      POSTGRESQL_REPLICATION_MODE: master
+      POSTGRESQL_REPLICATION_USER: repl
+      POSTGRESQL_REPLICATION_PASSWORD: replpass
+      POSTGRESQL_USERNAME: shop
+      POSTGRESQL_PASSWORD: shoppass
+      POSTGRESQL_DATABASE: catalog
+  replica:
+    image: bitnami/postgresql:16
+    ports: ["5433:5432"]
+    depends_on: [main]
+    environment:
+      POSTGRESQL_REPLICATION_MODE: slave
+      POSTGRESQL_MASTER_HOST: main
+      POSTGRESQL_MASTER_PORT_NUMBER: 5432
+      POSTGRESQL_REPLICATION_USER: repl
+      POSTGRESQL_REPLICATION_PASSWORD: replpass
+      POSTGRESQL_PASSWORD: shoppass</code></pre>
+<pre><code>docker compose up -d
+psql postgres://shop:shoppass@localhost:5432/catalog -c "CREATE TABLE products (id serial primary key, title text);"
+psql postgres://shop:shoppass@localhost:5432/catalog -c "INSERT INTO products (title) VALUES ('Red Mug');"
+psql postgres://shop:shoppass@localhost:5433/catalog -c "SELECT * FROM products;"      <span class="c"># same row, on the replica</span>
+psql postgres://shop:shoppass@localhost:5433/catalog -c "INSERT INTO products (title) VALUES ('x');"
+<span class="o">ERROR:  cannot execute INSERT in a read-only transaction</span>                                     <span class="c"># replicas really are read-only</span></code></pre>
+        <p>Point <code>catalog.py</code>’s two connections at ports 5432 and 5433 (with <code>psycopg</code>) and the backend half of the script works unchanged.</p>
+      </li>
+    </ol>
+
+    <div class="callout key">
+      <span class="cap">Try next (the lesson’s stretch)</span>
+      <p>Add a cache: a plain Python <code>dict</code> in <code>get_product</code> that stores titles by id. Update a title and read it again: the dict still returns the old one, and it never recovers until you delete that key in <code>update_title</code>. That is cache invalidation, and that is why the lesson chose replicas. Then add fix 1 from section 7.4: give <code>get_product</code> an <code>is_admin</code> flag that forces the main connection, and the stale read disappears for the owner.</p>
+    </div>
+  </section>
+
+  <!-- 9 -->
+  <section id="interview" class="extra">
+    <div class="sec-head">
+      <span class="sec-num">9</span>
+      <div>
+        <h2>In the interview</h2>
+        <div class="sec-meta"><span class="badge">Extra depth · not in the video</span></div>
+      </div>
+    </div>
+    <div class="callout say">
+      <span class="cap">What to say, in the lesson’s order</span>
+      <p>“Let me estimate first: a hundred products at a kilobyte each is a hundred kilobytes, so storage is trivial and I’ll use a relational database because the data is structured. The traffic is read-heavy: customers only read, one owner writes a few times a day. So: a customer frontend and a separate admin UI, both calling one stateless backend behind a load balancer with autoscaling. To scale reads I’d add read replicas and have each API server hold two connections and spread reads across them. I’m choosing replicas over a cache because writes are so rare that replication keeps every copy fresh for free, whereas a cache would need invalidation code. I’d route the owner’s own reads to the main so they never see a stale edit, put images in S3 behind a CDN, and add a cache only when replicas stop being the cheap answer.”</p>
+    </div>
+
+    <div class="prose">
+      <h3>The follow-up they will ask: “now make it a marketplace”</h3>
+      <p><strong>“Ten thousand shops, ten million products, fifty million page views a day. What changes?”</strong> Same route: numbers, then the picture, then what you would add.</p>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <span class="k">1 · Numbers</span>
+        <h3>Most of it still fits</h3>
+        <ul>
+          <li>10M products × 1 KB = 10 GB of rows. Still one database.</li>
+          <li>10M products × 4 photos × 300 KB = 12 TB of images. Not the database: S3 + CDN.</li>
+          <li>50M views/day ≈ 580 req/s average, ~2,000/s peak, ×4 API calls per page ≈ 8,000/s. Autoscaling handles it.</li>
+          <li>Writes: 10,000 owners × a few edits/day. Still tiny.</li>
+        </ul>
+      </div>
+      <div class="card teal">
+        <span class="k">2 · What stays</span>
+        <h3>The whole shape</h3>
+        <ul>
+          <li>Two front ends, one backend, autoscaled.</li>
+          <li>One relational main with replicas; writes are still rare.</li>
+          <li>Add a <code>shop_id</code> column and index to every table; every query filters by it.</li>
+        </ul>
+      </div>
+      <div class="card amber">
+        <span class="k">3 · What you add</span>
+        <h3>Three new boxes</h3>
+        <ul>
+          <li><strong>CDN + S3</strong> for images (99% of the bytes).</li>
+          <li><strong>Cache</strong> for hot products and shop pages, invalidated on write; CDN caches listing JSON for 30 s.</li>
+          <li><strong>Search index</strong> (Elasticsearch) fed from the database, because “red mug under ₹500” is not a job for <code>LIKE</code>.</li>
+        </ul>
+      </div>
+      <div class="card red">
+        <span class="k">4 · Trade-offs to name</span>
+        <h3>Say them before being asked</h3>
+        <ul>
+          <li>A famous shop is a hot key: its reads all hit one place. The cache absorbs it.</li>
+          <li>Cache and search index are copies: both can be seconds behind. Fine for a catalog, never for stock or money.</li>
+          <li>If one database ever is not enough, shard by <code>shop_id</code> on a hash ring (lesson 24): a shop never spans two shards.</li>
+        </ul>
+      </div>
+    </div>
+
+    <figure>
+      <p class="cap">The picture for the follow-up</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 290" role="img" aria-label="Customers reach a CDN which serves images from S3 and caches listing pages, then the catalog frontend and backend. The backend reads from a Redis cache, the main database and its replicas, and a search index. Shop owners use the admin UI, upload images straight to S3 with pre-signed URLs, and write through the backend to the main database, which replicates to replicas and feeds the search index.">
+          <path class="wire" d="M96 60H130" marker-end="url(#ah)"/>
+          <path class="wire" d="M230 60H270" marker-end="url(#ah)"/>
+          <path class="wire" d="M400 60H440" marker-end="url(#ah)"/>
+          <path class="wire dash" d="M180 80V110" marker-end="url(#ah)"/>
+          <path class="wire teal" d="M520 80C520 110 560 110 580 110" marker-end="url(#ah-teal)"/>
+          <path class="wire accent" d="M540 60H580" marker-end="url(#ah-accent)"/>
+          <path class="wire teal" d="M520 80C520 160 560 160 580 160" marker-end="url(#ah-teal)"/>
+          <path class="wire teal dash" d="M520 80C520 210 560 210 580 210" marker-end="url(#ah-teal)"/>
+          <path class="wire dash" d="M650 80V95" marker-end="url(#ah)"/>
+          <path class="wire dash" d="M650 130V145" marker-end="url(#ah)"/>
+          <path class="wire dash" d="M650 180V195" marker-end="url(#ah)"/>
+          <path class="wire" d="M96 240H130" marker-end="url(#ah)"/>
+          <path class="wire accent" d="M230 240C340 240 380 100 440 80" marker-end="url(#ah-accent)"/>
+          <path class="wire dash" d="M180 220V150" marker-end="url(#ah)"/>
+          <text x="113" y="50" text-anchor="middle" class="t-mono t-muted">https</text>
+          <text x="250" y="50" text-anchor="middle" class="t-mono t-muted">miss</text>
+          <text x="560" y="50" text-anchor="middle" class="t-mono t-accent">writes</text>
+          <text x="545" y="99" text-anchor="start" class="t-mono t-teal">hot</text>
+          <text x="545" y="149" text-anchor="start" class="t-mono t-teal">rest</text>
+          <text x="545" y="199" text-anchor="start" class="t-mono t-teal">search</text>
+          <text x="198" y="100" text-anchor="start" class="t-sm t-muted">images</text>
+          <text x="198" y="190" text-anchor="start" class="t-sm t-muted">pre-signed upload</text>
+          <text x="300" y="262" text-anchor="middle" class="t-mono t-accent">POST / PUT (shop_id)</text>
+          <text x="665" y="92" text-anchor="start" class="t-sm t-muted">invalidate</text>
+          <text x="665" y="142" text-anchor="start" class="t-sm t-muted">replicate</text>
+          <text x="665" y="192" text-anchor="start" class="t-sm t-muted">feed</text>
+
+          <rect class="node" x="16" y="40" width="80" height="40" rx="10"/><text x="56" y="65" text-anchor="middle">Customers</text>
+          <rect class="node" x="130" y="40" width="100" height="40" rx="10"/><text x="180" y="65" text-anchor="middle">CDN</text>
+          <rect class="node" x="130" y="110" width="100" height="40" rx="10"/><text x="180" y="135" text-anchor="middle">S3 · images</text>
+          <rect class="svc" x="270" y="36" width="130" height="48" rx="12"/><text x="335" y="65" text-anchor="middle" class="t-b">Frontend</text>
+          <rect class="svc" x="440" y="30" width="100" height="50" rx="12"/><text x="490" y="60" text-anchor="middle" class="t-b">Backend</text>
+          <rect class="node copy" x="580" y="30" width="140" height="50" rx="10"/><text x="650" y="50" text-anchor="middle" class="t-b">Main DB</text><text x="650" y="68" text-anchor="middle" class="t-sm t-muted">shop_id on every row</text>
+          <rect class="node" x="580" y="95" width="140" height="35" rx="10"/><text x="650" y="117" text-anchor="middle">Redis cache</text>
+          <rect class="node ghost" x="580" y="145" width="140" height="35" rx="10"/><text x="650" y="167" text-anchor="middle" class="t-muted">Read replicas</text>
+          <rect class="node" x="580" y="195" width="140" height="35" rx="10"/><text x="650" y="217" text-anchor="middle">Search index</text>
+          <rect class="node" x="16" y="220" width="80" height="40" rx="10"/><text x="56" y="245" text-anchor="middle">Owners</text>
+          <rect class="svc" x="130" y="220" width="100" height="40" rx="12"/><text x="180" y="245" text-anchor="middle" class="t-b">Admin UI</text>
+          <text x="380" y="278" text-anchor="middle" class="t-muted">same shape as the one-shop design, plus CDN + S3, a cache and a search index</text>
+        </svg>
+      </div>
+    </figure>
+
+    <div class="prose"><p>Likely follow-ups. Answer each out loud before opening it.</p></div>
+
+    <details class="qa">
+      <summary>Why a relational database and not NoSQL?</summary>
+      <div class="a">
+        <p>The data is tiny (100 KB) and structured: every product has the same fields. A relational table fits that shape exactly, gives you constraints and indexes for free, and there is no scale argument for anything else. Pick the database for the shape of the data; size only matters once it is large.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>When do you need a load balancer?</summary>
+      <div class="a">
+        <p>The moment you have more than one server for the same job. It is the single address clients talk to and it spreads requests across the servers. It is so universal that the lesson stops drawing it: a service box means “load balancer plus stateless servers”.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Why a separate admin UI? It is just another frontend.</summary>
+      <div class="a">
+        <p>Two reasons: the admin screens are different code with different bugs, and admin is a superpower. Shipping admin screens inside the public frontend puts the admin API calls in every customer’s browser. A separate frontend keeps them out of sight. The backend still checks the role on every write, because the frontend is never the security boundary.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Why read replicas instead of a cache?</summary>
+      <div class="a">
+        <p>Because writes are rare and tiny, replication keeps every copy fresh with no code. A cache would need invalidation on every edit. The lesson’s honesty: both are valid, it chose the one that needs no extra correctness work for this system.</p>
+        <p>Flip the choice when reads become enormous and repetitive: a cache then serves the hot products for a fraction of the cost of another database server.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Can the main database serve reads?</summary>
+      <div class="a">
+        <p>Yes. “Main only takes writes” is a habit, not a rule. Here the writes are a handful a day, so the main has almost all its capacity free for reads. Which connection a read uses is a decision in your backend code, nothing more.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>How does the backend decide where a read goes?</summary>
+      <div class="a">
+        <p>Each API server opens one connection per database at start-up. For a read it picks one at random (or round robin, or weighted). For a write it always uses the main. Adding a replica is adding a connection.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>What goes wrong with read replicas?</summary>
+      <div class="a">
+        <p>Replication lag. Replicas are a little behind the main, so a read just after a write can return the old row. The owner hits Save, reloads, and sees the old title.</p>
+        <p>Fix: route the admin’s reads to the main, or route any user’s reads to the main for a few seconds after they write. Synchronous replication removes the lag but slows every write.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>What happens if the main database dies?</summary>
+      <div class="a">
+        <p>Reads keep working from the replicas; writes stop until a replica is promoted to be the new main (failover, lesson 19). A read replica can double as the standby for this, which is one more reason to have one even at small scale.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Where do the product images go?</summary>
+      <div class="a">
+        <p>Not in the database. Bytes go to blob storage (S3), the table keeps the key, a CDN serves them near the user, and the owner uploads straight to S3 with a pre-signed URL so the bytes never pass through the API servers (lesson 22). Images will be nearly all of the bandwidth of a shop.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>How do you paginate the listing?</summary>
+      <div class="a">
+        <p>With a cursor (“give me 20 rows after id 40”) rather than page numbers. Offset pagination gets slower as the offset grows and skips or repeats rows when the owner edits between page loads. A cursor on an indexed column is constant time and stable.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Isn’t this over-engineered for one shop?</summary>
+      <div class="a">
+        <p>Yes, and say so. At a few hundred requests per second one API server and one database would cope. The lesson adds each piece to teach what it is for. In the interview, do the estimate, state that one of each would do, then explain which piece you would add first (a second server and a standby, for availability) and at what traffic the replicas and then a cache become necessary.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>How would you support 10,000 shops?</summary>
+      <div class="a">
+        <p>A <code>shop_id</code> column on every table, indexed, with every query filtering by it: 10 million products are still only 10 GB. Images to S3 and a CDN, a cache for hot shops, a search index. Only if one database cannot hold or serve it all, shard by <code>shop_id</code> on a consistent-hashing ring so a shop never spans two shards.</p>
+      </div>
+    </details>
+  </section>
+
+  <nav class="lesson-nav" aria-label="Lessons">
+    <a href="24-consistent-hashing.html"><span>← Lesson 24</span>Consistent Hashing</a>
+  </nav>
+
+  <footer>
+    <p>Notes on lesson 26, “Design E-commerce Product Listing” (19 min 39 s). Blue sections follow the video. Amber sections add depth beyond it. The lab script needs only Python 3; the Postgres replication part needs Docker and was not run here.</p>
+  </footer>
+
+</div>
+
+<script>
+  (function(){
+    var themeBtn = document.getElementById("themeBtn");
+    if (themeBtn) themeBtn.addEventListener("click", function(){
+      var root = document.documentElement;
+      var isDark = root.getAttribute("data-theme") === "dark"
+        || (!root.getAttribute("data-theme") && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+      root.setAttribute("data-theme", isDark ? "light" : "dark");
+    });
+  })();
+</script>
+<script src="../js/vendor/rough.js"></script>
+<script src="../js/sketch.js"></script>
+</body>
+</html>

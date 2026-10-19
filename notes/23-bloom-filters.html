@@ -1,0 +1,855 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bloom Filters — notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Patrick+Hand&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../css/notes.css">
+<style>
+  /* page-specific: bit cells in the diagrams */
+  svg.dia .cell{fill:var(--surface-2);stroke:var(--line-strong);stroke-width:1.5}
+  svg.dia .cell.on{fill:color-mix(in srgb,var(--amber) 28%,var(--surface));stroke:var(--amber)}
+  svg.dia text.t-num{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:14px;font-weight:600}
+  svg.dia text.t-idx{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:10px;fill:var(--muted)}
+</style>
+</head>
+<body>
+
+<!-- arrowheads shared by every diagram on the page -->
+<svg class="dia" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head teal" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head red" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head accent" d="M0 0L10 5L0 10z"/></marker>
+  </defs>
+</svg>
+
+<div class="wrap">
+
+  <header class="hero">
+    <div class="topbar">
+      <p class="eyebrow">Lesson 23 · Efficiency · Notes</p>
+      <div class="topbar-right">
+        <a class="back" href="../index.html">← Learning plan</a>
+        <button class="toggle" id="themeBtn" type="button">◐ Theme</button>
+      </div>
+    </div>
+    <h1>Bloom Filters</h1>
+    <p class="lede">A Bloom filter is a few kilobytes of bits that can tell you, with certainty, that something is <em>not</em> in a set. These notes follow the lesson’s Instagram example, then go deeper on sizing, placement, and the follow-up questions interviewers ask.</p>
+    <div class="chips">
+      <span class="chip"><b>20 min 28 s</b> video</span>
+      <span class="chip"><b>Blue</b> sections · from the video</span>
+      <span class="chip"><b style="color:var(--amber)">Amber</b> sections · extra depth</span>
+    </div>
+  </header>
+
+  <div class="tldr">
+    <h2>The whole lesson in six lines</h2>
+    <ol>
+      <li>A <strong>Bloom filter</strong> answers one question, “is X in the set?”, with one of two answers: <strong>definitely no</strong> or <strong>probably yes</strong>. It can never miss something that is really there.</li>
+      <li>It is an array of bits. To add an item you hash it and switch a few bits on. The item itself is never stored, which is why the filter is tiny.</li>
+      <li>The lesson’s problem: Instagram must not recommend a Reel you already watched. A set of watched IDs per user is exact, but it grows without end and has to be loaded into memory to be checked.</li>
+      <li>The key insight: a watch cannot be undone. If you give up “remove”, you can also give up storing the IDs. Relax one constraint, gain a lot of space and speed.</li>
+      <li>The price: as the bits fill up, the filter says “probably yes” for things that are not there (<strong>false positives</strong>). Its size is fixed when it is created, it cannot be grown or emptied, so size it for the maximum and rebuild it from the real database when needed.</li>
+      <li>Use it wherever you insert but never remove, need a fast and certain “no”, and can live with an occasional wrong “yes”: feeds, recommendations, crawlers, and inside databases and caches.</li>
+    </ol>
+  </div>
+
+  <ul class="toc" aria-label="Contents">
+    <li><a href="#sketch"><b>✎</b>The picture to draw</a></li>
+    <li><a href="#problem"><b>1</b>Don’t show it twice</a></li>
+    <li><a href="#insight"><b>2</b>You cannot un-watch</a></li>
+    <li><a href="#how"><b>3</b>Bits and a hash</a></li>
+    <li><a href="#answers"><b>4</b>“No” and “maybe”</a></li>
+    <li><a href="#fill"><b>5</b>Filling up and sizing</a></li>
+    <li><a href="#use"><b>6</b>Redis and where to use it</a></li>
+    <li><a href="#deeper"><b>7</b>Going deeper</a></li>
+    <li><a href="#lab"><b>8</b>Hands-on lab</a></li>
+    <li><a href="#interview"><b>9</b>In the interview</a></li>
+  </ul>
+
+  <section id="sketch" class="sketch-sec">
+    <div class="sec-head">
+      <span class="sec-num">✎</span>
+      <div>
+        <h2>The picture to draw</h2>
+        <div class="sec-meta"><span class="badge">Sketch · editable in Excalidraw</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>Two halves. On the left, how the filter works: each item goes through <em>k</em> hash functions and switches on <em>k</em> bits; a check hashes the same way and looks at those bits. On the right, where it sits: a cheap memory check in front of the expensive lookup. Draw the left half when asked “how does it work”, the right half when asked “where would you use it”.</p>
+    </div>
+    <div class="paper"><button class="zoom-btn" type="button" data-zoom>⤢ Full size</button><div class="paper-scroll"><svg class="sketch" data-sketch="sk" role="img" aria-label="Left: adding alice and bob sets three bits each in a 12-bit array through three hash functions; checking carol finds one of its bits still zero, so it is definitely absent. Right: a client asks an API server, which asks an in-memory Bloom filter first and only goes to the database when the filter says maybe. Notes explain each numbered part."></svg></div></div>
+    <p class="paper-foot"><span class="cap">Sketch · lesson 23</span><span><a class="btn ghost" href="../diagrams/23-bloom-filters.excalidraw" download>Download for Excalidraw</a> &nbsp; open it at excalidraw.com → menu → Open</span></p>
+    <script type="application/json" id="sk" data-sketch-src="diagrams/23-bloom-filters.excalidraw">{"elements":[{"id":"e29735a1d","type":"text","x":0,"y":0,"width":385.00000000000006,"height":35.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":2035525363,"version":1,"versionNonce":323946140,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"Lesson 23 · Bloom filters","originalText":"Lesson 23 · Bloom filters","fontSize":28,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e32899388","type":"text","x":0,"y":42,"width":1144.0,"height":20.0,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1397871145,"version":1,"versionNonce":103694313,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"A tiny bit array that answers “definitely NOT here” or “probably here”. Put it in front of anything expensive. Follow the numbers.","originalText":"A tiny bit array that answers “definitely NOT here” or “probably here”. Put it in front of anything expensive. Follow the numbers.","fontSize":16,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e945979a","type":"text","x":20,"y":78,"width":371.25000000000006,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1763673107,"version":1,"versionNonce":1150797846,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"A · How it works: k hash functions set k bits","originalText":"A · How it works: k hash functions set k bits","fontSize":15,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"ec0c7409","type":"rectangle","x":0,"y":110,"width":170,"height":44,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["in1"],"frameId":null,"roundness":{"type":3},"seed":785310973,"version":1,"versionNonce":1251527727,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e76c823b","type":"text","x":35.49999999999999,"y":122.625,"width":99.00000000000001,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["in1"],"frameId":null,"roundness":null,"seed":1953574603,"version":1,"versionNonce":1089709947,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"add(“alice”)","originalText":"add(“alice”)","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e1b7b3ae7","type":"rectangle","x":0,"y":190,"width":170,"height":44,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["in2"],"frameId":null,"roundness":{"type":3},"seed":80521325,"version":1,"versionNonce":184570286,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e3781b3ae","type":"text","x":43.75,"y":202.625,"width":82.5,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["in2"],"frameId":null,"roundness":null,"seed":898017870,"version":1,"versionNonce":150013384,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"add(“bob”)","originalText":"add(“bob”)","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e1ece0b93","type":"rectangle","x":0,"y":330,"width":170,"height":44,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#b2f2bb","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["q"],"frameId":null,"roundness":{"type":3},"seed":194804717,"version":1,"versionNonce":1183364968,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e3656a514","type":"text","x":27.249999999999993,"y":342.625,"width":115.50000000000001,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["q"],"frameId":null,"roundness":null,"seed":126938844,"version":1,"versionNonce":1775651416,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"check(“carol”)","originalText":"check(“carol”)","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4860c968","type":"rectangle","x":250,"y":120,"width":110,"height":36,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#e9ecef","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["h1"],"frameId":null,"roundness":{"type":3},"seed":265862674,"version":1,"versionNonce":2034632751,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e1c93182d","type":"text","x":280.25,"y":128.625,"width":49.50000000000001,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["h1"],"frameId":null,"roundness":null,"seed":1354258845,"version":1,"versionNonce":1347402587,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"hash 1","originalText":"hash 1","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4a9fa479","type":"rectangle","x":250,"y":170,"width":110,"height":36,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#e9ecef","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["h2"],"frameId":null,"roundness":{"type":3},"seed":2035189461,"version":1,"versionNonce":132847737,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e49de8268","type":"text","x":280.25,"y":178.625,"width":49.50000000000001,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["h2"],"frameId":null,"roundness":null,"seed":1257440635,"version":1,"versionNonce":851864843,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"hash 2","originalText":"hash 2","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e658f14f","type":"rectangle","x":250,"y":220,"width":110,"height":36,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#e9ecef","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["h3"],"frameId":null,"roundness":{"type":3},"seed":2096491879,"version":1,"versionNonce":474769609,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e5f66bd9","type":"text","x":280.25,"y":228.625,"width":49.50000000000001,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["h3"],"frameId":null,"roundness":null,"seed":1195428768,"version":1,"versionNonce":1843546982,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"hash 3","originalText":"hash 3","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e110bdf57","type":"rectangle","x":440,"y":160,"width":24,"height":28,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffffff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":{"type":3},"seed":621931212,"version":1,"versionNonce":900094242,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e1276f353","type":"text","x":448.15,"y":166,"width":7.700000000000001,"height":17.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":1161114103,"version":1,"versionNonce":252956897,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"0","originalText":"0","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4913b32d","type":"text","x":448.975,"y":192,"width":6.050000000000001,"height":13.75,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":662459677,"version":1,"versionNonce":1203143341,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"0","originalText":"0","fontSize":11,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6876d418","type":"rectangle","x":464,"y":160,"width":24,"height":28,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffd8a8","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":{"type":3},"seed":1464589643,"version":1,"versionNonce":388106950,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"ed30edf2","type":"text","x":472.15,"y":166,"width":7.700000000000001,"height":17.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":1248976841,"version":1,"versionNonce":1226652085,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"1","originalText":"1","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e51c7eaa4","type":"text","x":472.975,"y":192,"width":6.050000000000001,"height":13.75,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":403449955,"version":1,"versionNonce":799717634,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"1","originalText":"1","fontSize":11,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"ec789aea","type":"rectangle","x":488,"y":160,"width":24,"height":28,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffffff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":{"type":3},"seed":1176272277,"version":1,"versionNonce":1529246226,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e809781c","type":"text","x":496.15,"y":166,"width":7.700000000000001,"height":17.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":1211971682,"version":1,"versionNonce":127992539,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"0","originalText":"0","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4f3bb4d9","type":"text","x":496.975,"y":192,"width":6.050000000000001,"height":13.75,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":442292976,"version":1,"versionNonce":1066042003,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"2","originalText":"2","fontSize":11,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e571758ab","type":"rectangle","x":512,"y":160,"width":24,"height":28,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffd8a8","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":{"type":3},"seed":1141860530,"version":1,"versionNonce":918247488,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e637c3b8d","type":"text","x":520.15,"y":166,"width":7.700000000000001,"height":17.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":674625912,"version":1,"versionNonce":999872393,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"1","originalText":"1","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4af3b0e9","type":"text","x":520.975,"y":192,"width":6.050000000000001,"height":13.75,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":1983075268,"version":1,"versionNonce":973206041,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"3","originalText":"3","fontSize":11,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2e4854ad","type":"rectangle","x":536,"y":160,"width":24,"height":28,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffffff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":{"type":3},"seed":643744727,"version":1,"versionNonce":533492028,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e65ae3a14","type":"text","x":544.15,"y":166,"width":7.700000000000001,"height":17.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":386046158,"version":1,"versionNonce":1501079115,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"0","originalText":"0","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e63d17511","type":"text","x":544.975,"y":192,"width":6.050000000000001,"height":13.75,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":524193278,"version":1,"versionNonce":175782304,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"4","originalText":"4","fontSize":11,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4986b758","type":"rectangle","x":560,"y":160,"width":24,"height":28,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffffff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":{"type":3},"seed":644780075,"version":1,"versionNonce":1127850897,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e3f5ff904","type":"text","x":568.15,"y":166,"width":7.700000000000001,"height":17.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":1879343460,"version":1,"versionNonce":737608423,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"0","originalText":"0","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e5d5e7691","type":"text","x":568.975,"y":192,"width":6.050000000000001,"height":13.75,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":963864094,"version":1,"versionNonce":618341637,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"5","originalText":"5","fontSize":11,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4df25e7f","type":"rectangle","x":584,"y":160,"width":24,"height":28,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffd8a8","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":{"type":3},"seed":2104909469,"version":1,"versionNonce":157197672,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"ef1cc789","type":"text","x":592.15,"y":166,"width":7.700000000000001,"height":17.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":1099367391,"version":1,"versionNonce":897911925,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"1","originalText":"1","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e151d7a6b","type":"text","x":592.975,"y":192,"width":6.050000000000001,"height":13.75,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":1625947776,"version":1,"versionNonce":734559256,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"6","originalText":"6","fontSize":11,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e13743aab","type":"rectangle","x":608,"y":160,"width":24,"height":28,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffffff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":{"type":3},"seed":2004182514,"version":1,"versionNonce":1050040258,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e35fa3635","type":"text","x":616.15,"y":166,"width":7.700000000000001,"height":17.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":84196940,"version":1,"versionNonce":2065920251,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"0","originalText":"0","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e558818e9","type":"text","x":616.975,"y":192,"width":6.050000000000001,"height":13.75,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":166688708,"version":1,"versionNonce":1641903440,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"7","originalText":"7","fontSize":11,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e476f06be","type":"rectangle","x":632,"y":160,"width":24,"height":28,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffd8a8","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":{"type":3},"seed":1230563834,"version":1,"versionNonce":1694566832,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e700fa82c","type":"text","x":640.15,"y":166,"width":7.700000000000001,"height":17.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":1757400422,"version":1,"versionNonce":673767655,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"1","originalText":"1","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2b892122","type":"text","x":640.975,"y":192,"width":6.050000000000001,"height":13.75,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":1493135432,"version":1,"versionNonce":752002366,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"8","originalText":"8","fontSize":11,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4c144fe7","type":"rectangle","x":656,"y":160,"width":24,"height":28,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffffff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":{"type":3},"seed":1066600998,"version":1,"versionNonce":1245315470,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e66008e6f","type":"text","x":664.15,"y":166,"width":7.700000000000001,"height":17.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":979693494,"version":1,"versionNonce":147667305,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"0","originalText":"0","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6b841080","type":"text","x":664.975,"y":192,"width":6.050000000000001,"height":13.75,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":200995868,"version":1,"versionNonce":2028687212,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"9","originalText":"9","fontSize":11,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e228d5ec1","type":"rectangle","x":680,"y":160,"width":24,"height":28,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffd8a8","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":{"type":3},"seed":1018118421,"version":1,"versionNonce":1496886435,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e5502f08e","type":"text","x":688.15,"y":166,"width":7.700000000000001,"height":17.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":139586394,"version":1,"versionNonce":130286598,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"1","originalText":"1","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e5d96a108","type":"text","x":685.95,"y":192,"width":12.100000000000001,"height":13.75,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":1506442652,"version":1,"versionNonce":664876774,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"10","originalText":"10","fontSize":11,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e52d51e41","type":"rectangle","x":704,"y":160,"width":24,"height":28,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffffff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":{"type":3},"seed":1241130074,"version":1,"versionNonce":2132657286,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e5732c79a","type":"text","x":712.15,"y":166,"width":7.700000000000001,"height":17.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":1765070035,"version":1,"versionNonce":957006265,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"0","originalText":"0","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e246da058","type":"text","x":709.95,"y":192,"width":12.100000000000001,"height":13.75,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bits"],"frameId":null,"roundness":null,"seed":1538946474,"version":1,"versionNonce":828480808,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"11","originalText":"11","fontSize":11,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e718a8945","type":"text","x":298.0,"y":106,"width":572.0,"height":16.25,"angle":0,"strokeColor":"#1971c2","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1435920784,"version":1,"versionNonce":745188127,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"alice → bits 1, 6, 10  ·  bob → bits 3, 8, 10  (bit 10 is shared — that is fine)","originalText":"alice → bits 1, 6, 10  ·  bob → bits 3, 8, 10  (bit 10 is shared — that is fine)","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2e35784","type":"text","x":441.0,"y":130,"width":286.0,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":2020027419,"version":1,"versionNonce":991483082,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"bit array · m = 12 bits · all start at 0","originalText":"bit array · m = 12 bits · all start at 0","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2d7fd915","type":"arrow","x":170,"y":132,"width":80,"height":6,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":360881140,"version":1,"versionNonce":1311939741,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[80,6]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"eefcfebd","type":"arrow","x":170,"y":132,"width":80,"height":56,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1060197638,"version":1,"versionNonce":126603649,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[80,56]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e1bee3b7e","type":"arrow","x":170,"y":132,"width":80,"height":106,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1649767777,"version":1,"versionNonce":617255373,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[80,106]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e108e3868","type":"arrow","x":170,"y":212,"width":80,"height":64,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1585623284,"version":1,"versionNonce":531748802,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[80,-64]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e32ee4fa9","type":"arrow","x":170,"y":212,"width":80,"height":14,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":839558095,"version":1,"versionNonce":1968847850,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[80,-14]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e6f8ac159","type":"arrow","x":170,"y":212,"width":80,"height":36,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1066240031,"version":1,"versionNonce":173047028,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[80,36]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e154b7d8e","type":"arrow","x":360,"y":138,"width":116,"height":22,"angle":0,"strokeColor":"#1971c2","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":964622594,"version":1,"versionNonce":862524476,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[116,22]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e46540c09","type":"arrow","x":360,"y":188,"width":236,"height":28,"angle":0,"strokeColor":"#1971c2","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":596654992,"version":1,"versionNonce":1897052333,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[236,-28]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e1186cbc0","type":"arrow","x":360,"y":238,"width":332,"height":78,"angle":0,"strokeColor":"#1971c2","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1759390061,"version":1,"versionNonce":924538201,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[332,-78]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e6e970b05","type":"arrow","x":170,"y":352,"width":80,"height":82,"angle":0,"strokeColor":"#0b7285","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1181587504,"version":1,"versionNonce":597904679,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[80,0],[80,-82]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e5a6b351e","type":"text","x":280,"y":332,"width":92.95,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":891842471,"version":1,"versionNonce":2118421926,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"same 3 hashes","originalText":"same 3 hashes","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2dec36a1","type":"arrow","x":360,"y":270,"width":140,"height":66,"angle":0,"strokeColor":"#e03131","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1466136595,"version":1,"versionNonce":1898789635,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[140,-66]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e30b24ce5","type":"arrow","x":360,"y":270,"width":236,"height":66,"angle":0,"strokeColor":"#0b7285","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":2056712111,"version":1,"versionNonce":495535104,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[236,-66]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e1351605f","type":"arrow","x":360,"y":270,"width":308,"height":66,"angle":0,"strokeColor":"#e03131","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":178208278,"version":1,"versionNonce":378424697,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[308,-66]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e135dbedf","type":"text","x":0,"y":400,"width":707.85,"height":32.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":498123580,"version":1,"versionNonce":1414153797,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"carol → bits 2, 6, 9.   Bit 2 is 0 → “definitely NOT in the set”. Answer at once; no lookup needed.\nIf all k bits had been 1 → “probably in the set” (could be a false positive) → do the real lookup.","originalText":"carol → bits 2, 6, 9.   Bit 2 is 0 → “definitely NOT in the set”. Answer at once; no lookup needed.\nIf all k bits had been 1 → “probably in the set” (could be a false positive) → do the real lookup.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e1dddf4f6","type":"text","x":0,"y":452,"width":815.1,"height":16.25,"angle":0,"strokeColor":"#e03131","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":25905232,"version":1,"versionNonce":1041449536,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"Rules:  never a false “no”  ·  sometimes a false “yes”  ·  cannot delete  ·  cannot list members  ·  cannot resize","originalText":"Rules:  never a false “no”  ·  sometimes a false “yes”  ·  cannot delete  ·  cannot list members  ·  cannot resize","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6a614618","type":"text","x":760,"y":78,"width":239.25000000000003,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1265133104,"version":1,"versionNonce":391578344,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"B · Where it sits in a system","originalText":"B · Where it sits in a system","fontSize":15,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e21a1ae63","type":"rectangle","x":760,"y":140,"width":120,"height":56,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["client"],"frameId":null,"roundness":{"type":3},"seed":605441631,"version":1,"versionNonce":8790957,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e12a58628","type":"text","x":795.25,"y":158.625,"width":49.50000000000001,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["client"],"frameId":null,"roundness":null,"seed":899680760,"version":1,"versionNonce":1148025345,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"Client","originalText":"Client","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2f43b377","type":"rectangle","x":940,"y":140,"width":150,"height":56,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["api"],"frameId":null,"roundness":{"type":3},"seed":1309562236,"version":1,"versionNonce":1216208521,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e28c8447b","type":"text","x":973.75,"y":158.625,"width":82.5,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["api"],"frameId":null,"roundness":null,"seed":2046762209,"version":1,"versionNonce":269490964,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"API server","originalText":"API server","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e58621897","type":"rectangle","x":1210,"y":140,"width":150,"height":56,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#d0bfff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["redis"],"frameId":null,"roundness":{"type":3},"seed":1845122138,"version":1,"versionNonce":1107009420,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e79a0f03e","type":"text","x":1220.65,"y":151.75,"width":128.70000000000002,"height":32.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["redis"],"frameId":null,"roundness":null,"seed":1326270331,"version":1,"versionNonce":1406529762,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"Redis (shared)\nBF.ADD / BF.EXISTS","originalText":"Redis (shared)\nBF.ADD / BF.EXISTS","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e568db96e","type":"rectangle","x":940,"y":260,"width":150,"height":70,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffd8a8","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bf"],"frameId":null,"roundness":{"type":3},"seed":1588675649,"version":1,"versionNonce":115948851,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e3a734d2f","type":"text","x":945.7,"y":277.5,"width":138.60000000000002,"height":35.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["bf"],"frameId":null,"roundness":null,"seed":1931732424,"version":1,"versionNonce":1870414235,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"Bloom filter\n(in RAM, a few MB)","originalText":"Bloom filter\n(in RAM, a few MB)","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e63d60a49","type":"rectangle","x":1210,"y":260,"width":150,"height":70,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#b2f2bb","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["db"],"frameId":null,"roundness":{"type":3},"seed":2044160092,"version":1,"versionNonce":1878002762,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e571d15c0","type":"text","x":1219.55,"y":277.5,"width":130.9,"height":35.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["db"],"frameId":null,"roundness":null,"seed":1713419474,"version":1,"versionNonce":1201026917,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"Database / disk\n(slow, expensive)","originalText":"Database / disk\n(slow, expensive)","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e323978d2","type":"arrow","x":880,"y":168,"width":60,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":854848018,"version":1,"versionNonce":856800515,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[60,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e32728657","type":"text","x":863.525,"y":118,"width":92.95,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":222344215,"version":1,"versionNonce":1034062383,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"is “x” taken?","originalText":"is “x” taken?","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e51306686","type":"arrow","x":1015,"y":196,"width":0,"height":64,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":859944004,"version":1,"versionNonce":133676181,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[0,64]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e1865e4bf","type":"text","x":1027,"y":218,"width":114.4,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":144627903,"version":1,"versionNonce":2114557575,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"① ask the filter","originalText":"① ask the filter","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e1ab8c086","type":"arrow","x":1090,"y":160,"width":120,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":946239001,"version":1,"versionNonce":348543443,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[120,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"ee12217d","type":"text","x":1085.65,"y":140,"width":128.70000000000002,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":730259659,"version":1,"versionNonce":1290051973,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"or a shared filter","originalText":"or a shared filter","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6bacc2f","type":"arrow","x":1090,"y":295,"width":120,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":219858513,"version":1,"versionNonce":500965,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[120,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e488c5d8c","type":"text","x":1089.225,"y":274,"width":121.55000000000001,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":324838976,"version":1,"versionNonce":1152379866,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"② only if “maybe”","originalText":"② only if “maybe”","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"ecfcc8cf","type":"arrow","x":1210,"y":315,"width":120,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":2037851939,"version":1,"versionNonce":780846360,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[-120,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e4e8ef151","type":"text","x":1117.825,"y":322,"width":64.35000000000001,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":54762750,"version":1,"versionNonce":151001551,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"the truth","originalText":"the truth","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6fea1f9c","type":"text","x":897.025,"y":352,"width":235.95000000000002,"height":16.25,"angle":0,"strokeColor":"#0b7285","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":446574991,"version":1,"versionNonce":1318703119,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"“NO” → answer now (most requests)","originalText":"“NO” → answer now (most requests)","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e302848a6","type":"text","x":1188.475,"y":352,"width":193.05,"height":16.25,"angle":0,"strokeColor":"#e03131","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":319009743,"version":1,"versionNonce":1362384196,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"“maybe” → real check (rare)","originalText":"“maybe” → real check (rare)","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2049fb70","type":"text","x":760,"y":400,"width":586.3000000000001,"height":65.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":2051851967,"version":1,"versionNonce":746013369,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"Where you will meet it:\n• DB engines (Cassandra, HBase, RocksDB): skip disk files that cannot hold the key\n• CDN / cache: cache only on the 2nd request (“one-hit wonders” never enter)\n• “username taken?”, spell check, browser unsafe-site list, de-dup in web crawlers","originalText":"Where you will meet it:\n• DB engines (Cassandra, HBase, RocksDB): skip disk files that cannot hold the key\n• CDN / cache: cache only on the 2nd request (“one-hit wonders” never enter)\n• “username taken?”, spell check, browser unsafe-site list, de-dup in web crawlers","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2e9ce855","type":"ellipse","x":153,"y":93,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge4d177c08"],"frameId":null,"roundness":null,"seed":1018232522,"version":1,"versionNonce":263801686,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"eec3e762","type":"text","x":162.425,"y":98,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge4d177c08"],"frameId":null,"roundness":null,"seed":1823078164,"version":1,"versionNonce":1048118163,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"1","originalText":"1","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e7d294dd2","type":"ellipse","x":343,"y":103,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge7f1dfd6e"],"frameId":null,"roundness":null,"seed":1000704748,"version":1,"versionNonce":1031640629,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e3dee4b46","type":"text","x":352.425,"y":108,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge7f1dfd6e"],"frameId":null,"roundness":null,"seed":669697760,"version":1,"versionNonce":184435920,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"2","originalText":"2","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"ed147bda","type":"ellipse","x":723,"y":143,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge1272712e"],"frameId":null,"roundness":null,"seed":1609912491,"version":1,"versionNonce":735804864,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e5ec3d433","type":"text","x":732.425,"y":148,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge1272712e"],"frameId":null,"roundness":null,"seed":568561102,"version":1,"versionNonce":1027832786,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"3","originalText":"3","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e589550fc","type":"ellipse","x":153,"y":313,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge6a17eede"],"frameId":null,"roundness":null,"seed":346686776,"version":1,"versionNonce":1108819938,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e2f4ccfa","type":"text","x":162.425,"y":318,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge6a17eede"],"frameId":null,"roundness":null,"seed":440695868,"version":1,"versionNonce":2042225962,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"4","originalText":"4","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e439df03d","type":"ellipse","x":1073,"y":243,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge79dbd287"],"frameId":null,"roundness":null,"seed":776857499,"version":1,"versionNonce":314826550,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e58542273","type":"text","x":1082.425,"y":248,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge79dbd287"],"frameId":null,"roundness":null,"seed":1166453894,"version":1,"versionNonce":1963113122,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"5","originalText":"5","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e610ad416","type":"ellipse","x":1343,"y":243,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge37620d7"],"frameId":null,"roundness":null,"seed":1134106387,"version":1,"versionNonce":640142724,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e7d3f8756","type":"text","x":1352.425,"y":248,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge37620d7"],"frameId":null,"roundness":null,"seed":1380653906,"version":1,"versionNonce":1853976394,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"6","originalText":"6","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"eba63bd2","type":"rectangle","x":0,"y":510,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note1"],"frameId":null,"roundness":{"type":3},"seed":1495071204,"version":1,"versionNonce":1815584892,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e216c3905","type":"text","x":10,"y":519,"width":214.50000000000003,"height":97.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note1"],"frameId":null,"roundness":null,"seed":1113248781,"version":1,"versionNonce":787481804,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"① Add an item\nRun it through k hash\nfunctions (here 3). Each gives\na position in the bit array.\nSet those k bits to 1. The\nitem itself is NOT stored.","originalText":"① Add an item\nRun it through k hash\nfunctions (here 3). Each gives\na position in the bit array.\nSet those k bits to 1. The\nitem itself is NOT stored.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e7441d0eb","type":"rectangle","x":225,"y":510,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note2"],"frameId":null,"roundness":{"type":3},"seed":358720036,"version":1,"versionNonce":763851704,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e62cedc8c","type":"text","x":235,"y":519,"width":207.35000000000002,"height":81.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note2"],"frameId":null,"roundness":null,"seed":478443796,"version":1,"versionNonce":1143733459,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"② Hash functions\nFast, non-cryptographic:\nMurmurHash, xxHash. Trick:\ncompute two hashes h1, h2 and\nget k of them as h1 + i·h2.","originalText":"② Hash functions\nFast, non-cryptographic:\nMurmurHash, xxHash. Trick:\ncompute two hashes h1, h2 and\nget k of them as h1 + i·h2.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e45521247","type":"rectangle","x":450,"y":510,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note3"],"frameId":null,"roundness":{"type":3},"seed":1673007633,"version":1,"versionNonce":1079533638,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e2a327662","type":"text","x":460,"y":519,"width":214.50000000000003,"height":81.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note3"],"frameId":null,"roundness":null,"seed":1366748639,"version":1,"versionNonce":478978338,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"③ The bit array\nm bits, all zero at start. ~10\nbits per item ≈ 1% false\npositives. 100M items ≈ 120 MB\n— fits in RAM.","originalText":"③ The bit array\nm bits, all zero at start. ~10\nbits per item ≈ 1% false\npositives. 100M items ≈ 120 MB\n— fits in RAM.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4e7e432a","type":"rectangle","x":675,"y":510,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note4"],"frameId":null,"roundness":{"type":3},"seed":1742707121,"version":1,"versionNonce":1693074521,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e7e120e86","type":"text","x":685,"y":519,"width":207.35000000000002,"height":97.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note4"],"frameId":null,"roundness":null,"seed":1628484994,"version":1,"versionNonce":1831006406,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"④ Check an item\nHash it the same way. Any bit\nstill 0 → definitely absent.\nAll k bits 1 → probably\npresent (a collision is\npossible).","originalText":"④ Check an item\nHash it the same way. Any bit\nstill 0 → definitely absent.\nAll k bits 1 → probably\npresent (a collision is\npossible).","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e18fa8b84","type":"rectangle","x":900,"y":510,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note5"],"frameId":null,"roundness":{"type":3},"seed":1731040586,"version":1,"versionNonce":514081107,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e68bf224c","type":"text","x":910,"y":519,"width":214.50000000000003,"height":81.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note5"],"frameId":null,"roundness":null,"seed":860463132,"version":1,"versionNonce":1588865204,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"⑤ Put it in front\nA cheap memory check before\nthe expensive disk / network /\nDB lookup. Every true “no” is\nanswered without the lookup.","originalText":"⑤ Put it in front\nA cheap memory check before\nthe expensive disk / network /\nDB lookup. Every true “no” is\nanswered without the lookup.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e66d3637f","type":"rectangle","x":1125,"y":510,"width":215,"height":115.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note6"],"frameId":null,"roundness":{"type":3},"seed":486919347,"version":1,"versionNonce":429320601,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e4241fc5d","type":"text","x":1135,"y":519,"width":214.50000000000003,"height":81.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note6"],"frameId":null,"roundness":null,"seed":1058240950,"version":1,"versionNonce":763564744,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"⑥ The trade\nYou give up: exactness,\ndelete, listing, resizing. You\nget: tiny memory, O(k) time,\nand never a false “no”.","originalText":"⑥ The trade\nYou give up: exactness,\ndelete, listing, resizing. You\nget: tiny memory, O(k) time,\nand never a false “no”.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true}]}</script>
+  </section>
+
+  <!-- 1 -->
+  <section id="problem" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">1</span>
+      <div>
+        <h2>The problem: don’t show it twice</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 0:00</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson opens with the one-line definition: a Bloom filter is an <span class="term">approximate data structure</span> (also called <em>probabilistic</em>) that says <strong>with 100% certainty that an element does <em>not</em> belong to a set</strong>. Everything else follows from that sentence.</p>
+      <p>The example is Instagram Reels. A recommendation engine must show you something new, never a Reel you already watched. So before it recommends a Reel it has to ask: “has this user seen this one?”</p>
+      <h3>The first idea: a set per user <span class="ts">▶ 1:00</span></h3>
+      <p>Keep a set of every post ID each user has ever watched. Before recommending, check the set. Present → skip it. Absent → recommend it. This works, and it is exact.</p>
+      <p>Then look at the scale. People watch hundreds or thousands of Reels a day. Over months, every user’s set becomes huge. And a set is not something you can check from disk: it is built as a tree or a hash table, so to check one key you load the whole set into memory. Millions of users × thousands of Reels × months means you cannot hold that in memory. It is expensive and slow.</p>
+    </div>
+
+    <figure>
+      <p class="cap">The exact way, and why it hurts at scale</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 210" role="img" aria-label="A recommendation engine checks a per-user set of watched IDs before showing a Reel. The set grows forever and must be loaded fully into memory to be checked.">
+          <path class="wire" d="M156 70H214" marker-end="url(#ah)"/>
+          <path class="wire" d="M394 70H452" marker-end="url(#ah)"/>
+          <path class="wire red dash" d="M532 112V148" marker-end="url(#ah-red)"/>
+          <text x="185" y="60" text-anchor="middle" class="t-mono t-muted">candidate</text>
+          <text x="423" y="60" text-anchor="middle" class="t-mono t-muted">seen?</text>
+
+          <rect class="node" x="16" y="47" width="140" height="46" rx="10"/>
+          <text x="86" y="75" text-anchor="middle">Recommender</text>
+          <rect class="node main" x="214" y="40" width="180" height="60" rx="10"/>
+          <text x="304" y="65" text-anchor="middle" class="t-b">Reel 8812</text>
+          <text x="304" y="84" text-anchor="middle" class="t-muted">for user 42</text>
+
+          <rect class="node copy" x="452" y="28" width="160" height="84" rx="10"/>
+          <text x="532" y="52" text-anchor="middle" class="t-b">set&lt;post_id&gt; · user 42</text>
+          <text x="532" y="72" text-anchor="middle" class="t-mono">{ 17, 203, 981, 4410,</text>
+          <text x="532" y="90" text-anchor="middle" class="t-mono">8812, 9007, … }</text>
+
+          <rect class="node ghost" x="640" y="28" width="104" height="84" rx="10"/>
+          <text x="692" y="58" text-anchor="middle" class="t-muted">× millions</text>
+          <text x="692" y="78" text-anchor="middle" class="t-muted">of users</text>
+
+          <text x="532" y="170" text-anchor="middle" class="t-red">grows for ever · must sit in memory to be checked</text>
+          <text x="304" y="140" text-anchor="middle" class="t-muted">8812 is in the set → skip it; 8813 is not → recommend it</text>
+        </svg>
+      </div>
+      <figcaption>Exact, but the thing you check grows with every view, and checking it means holding it all in RAM.</figcaption>
+    </figure>
+    <div class="prose">
+      <p>The lesson’s question at this point: <strong>can we do better?</strong> That question is what gave rise to the Bloom filter.</p>
+    </div>
+  </section>
+
+  <!-- 2 -->
+  <section id="insight" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">2</span>
+      <div>
+        <h2>The insight: you cannot un-watch</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 2:50</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>A set gives you two operations: add and remove. But think about what a “view” is. Once you have watched a Reel, you do not <em>un</em>-watch it. The view is registered, and it stays registered. So for this problem we never need “remove”.</p>
+      <p>That is a constraint we can relax. And the lesson makes a general point here: almost every variant of a data structure starts this way. Drop something you do not need, and in exchange get something you do need, here much better space and time efficiency. <strong>You get some, you lose some.</strong> Computer science is trade-offs all the way down.</p>
+    </div>
+    <div class="callout key">
+      <span class="cap">The crux</span>
+      <p>If we are never going to take an item out, do we even need to store the item? No. We only need to remember that it was added. That is what a Bloom filter stores: not the IDs, only the fact that they were seen.</p>
+    </div>
+  </section>
+
+  <!-- 3 -->
+  <section id="how" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">3</span>
+      <div>
+        <h2>How it works: bits and a hash</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 4:16</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>Whenever you hear the word “filter” in this context it means a <span class="term">bit array</span>: an array of single bits, not even bytes. A Bloom filter is a bit array invented by a researcher named Bloom (Burton Bloom, in 1970), hence the name.</p>
+      <p>The lesson’s example uses a filter of <strong>8 bits</strong>, one byte, and stores words in it.</p>
+      <ol>
+        <li>Take the word <code>apple</code>. Pass it through a hash function (MD5, SHA, MurmurHash, any you like). Take the result <code>mod 8</code>, because there are 8 bits. Say you get <strong>2</strong>. Set bit 2 to 1.</li>
+        <li>Take <code>ball</code>. Same hash, mod 8. Say you get <strong>6</strong>. Set bit 6 to 1.</li>
+        <li>Take <code>cat</code>. Same hash, mod 8. Say you get <strong>2</strong> again. Bit 2 is already 1 from apple. Leave it at 1. That is fine.</li>
+      </ol>
+      <p>The “mod 8” is simply “mod the length of the bit array”. A 10 KB filter would be <code>mod (10 × 1024 × 8)</code>.</p>
+    </div>
+
+    <figure>
+      <p class="cap">Adding apple, ball and cat to an 8-bit filter</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 226" role="img" aria-label="Three words go through the same hash function mod 8. Apple maps to bit 2, ball to bit 6, cat to bit 2 again. Bits 2 and 6 are set; the other six bits stay zero.">
+          <path class="wire" d="M120 44C170 44 190 94 236 94" marker-end="url(#ah)"/>
+          <path class="wire" d="M120 104H236" marker-end="url(#ah)"/>
+          <path class="wire" d="M120 164C170 164 190 114 236 114" marker-end="url(#ah)"/>
+
+          <path class="wire accent" d="M396 94C440 94 450 70 526 70" marker-end="url(#ah-accent)"/>
+          <path class="wire accent" d="M396 104C460 104 470 70 686 70" marker-end="url(#ah-accent)"/>
+          <path class="wire accent dash" d="M396 114C430 114 450 70 526 70" marker-end="url(#ah-accent)"/>
+          <text x="470" y="56" text-anchor="middle" class="t-mono t-accent">→ 2</text>
+          <text x="610" y="56" text-anchor="middle" class="t-mono t-accent">→ 6</text>
+          <text x="470" y="148" text-anchor="middle" class="t-mono t-accent">→ 2 (again)</text>
+
+          <rect class="node" x="16" y="24" width="104" height="40" rx="10"/>
+          <text x="68" y="49" text-anchor="middle" class="t-mono">apple</text>
+          <rect class="node" x="16" y="84" width="104" height="40" rx="10"/>
+          <text x="68" y="109" text-anchor="middle" class="t-mono">ball</text>
+          <rect class="node" x="16" y="144" width="104" height="40" rx="10"/>
+          <text x="68" y="169" text-anchor="middle" class="t-mono">cat</text>
+
+          <rect class="node copy" x="236" y="78" width="160" height="52" rx="10"/>
+          <text x="316" y="100" text-anchor="middle" class="t-b">hash( word )</text>
+          <text x="316" y="119" text-anchor="middle" class="t-mono">mod 8</text>
+
+          <rect class="cell"    x="446" y="76" width="40" height="36"/><text x="466" y="100" text-anchor="middle" class="t-num">0</text><text x="466" y="128" text-anchor="middle" class="t-idx">0</text>
+          <rect class="cell"    x="486" y="76" width="40" height="36"/><text x="506" y="100" text-anchor="middle" class="t-num">0</text><text x="506" y="128" text-anchor="middle" class="t-idx">1</text>
+          <rect class="cell on" x="526" y="76" width="40" height="36"/><text x="546" y="100" text-anchor="middle" class="t-num">1</text><text x="546" y="128" text-anchor="middle" class="t-idx">2</text>
+          <rect class="cell"    x="566" y="76" width="40" height="36"/><text x="586" y="100" text-anchor="middle" class="t-num">0</text><text x="586" y="128" text-anchor="middle" class="t-idx">3</text>
+          <rect class="cell"    x="606" y="76" width="40" height="36"/><text x="626" y="100" text-anchor="middle" class="t-num">0</text><text x="626" y="128" text-anchor="middle" class="t-idx">4</text>
+          <rect class="cell"    x="646" y="76" width="40" height="36"/><text x="666" y="100" text-anchor="middle" class="t-num">0</text><text x="666" y="128" text-anchor="middle" class="t-idx">5</text>
+          <rect class="cell on" x="686" y="76" width="40" height="36"/><text x="706" y="100" text-anchor="middle" class="t-num">1</text><text x="706" y="128" text-anchor="middle" class="t-idx">6</text>
+          <rect class="cell"    x="726" y="76" width="30" height="36"/><text x="741" y="100" text-anchor="middle" class="t-num">0</text><text x="741" y="128" text-anchor="middle" class="t-idx">7</text>
+
+          <text x="600" y="172" text-anchor="middle" class="t-teal">one byte remembers that three words were added</text>
+          <text x="600" y="190" text-anchor="middle" class="t-muted">the words are gone: apple (5 bytes) + ball (4) + cat (3) = 12 bytes not stored</text>
+          <text x="316" y="150" text-anchor="middle" class="t-muted">same hash function every time</text>
+        </svg>
+      </div>
+      <figcaption>Two of eight bits are on. The lesson’s space comparison: storing the three words would take 12 bytes; the filter takes 1. Larger filters give an even bigger saving, because the bits per item do not grow with the size of the items.</figcaption>
+    </figure>
+  </section>
+
+  <!-- 4 -->
+  <section id="answers" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">4</span>
+      <div>
+        <h2>The two answers: “no” and “maybe”</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 7:05</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>Now check for words. Same hash function, same mod 8, then look at that one bit.</p>
+      <ul>
+        <li><code>dog</code> → say <strong>5</strong>. Bit 5 is 0. Nothing that was ever added could have landed on 5 and left it 0. So <strong>dog is definitely not in the set</strong>. Correct.</li>
+        <li><code>elephant</code> → say <strong>6</strong>. Bit 6 is 1. But we never added elephant; ball set that bit. The filter says “yes”, and it is wrong. This is a <span class="term">false positive</span>.</li>
+      </ul>
+    </div>
+
+    <div class="grid-2">
+      <figure style="margin:0">
+        <p class="cap">check(dog) → bit 5 → 0</p>
+        <svg class="dia" viewBox="0 0 340 150" role="img" aria-label="dog hashes to bit 5, which is zero, so dog is definitely not present.">
+          <path class="wire teal" d="M98 44C130 44 150 74 190 74" marker-end="url(#ah-teal)"/>
+          <rect class="node" x="14" y="24" width="84" height="40" rx="10"/>
+          <text x="56" y="49" text-anchor="middle" class="t-mono">dog</text>
+          <text x="150" y="40" text-anchor="middle" class="t-mono t-teal">→ 5</text>
+          <rect class="cell"    x="30"  y="92" width="34" height="30"/><text x="47"  y="112" text-anchor="middle" class="t-num">0</text>
+          <rect class="cell"    x="64"  y="92" width="34" height="30"/><text x="81"  y="112" text-anchor="middle" class="t-num">0</text>
+          <rect class="cell on" x="98"  y="92" width="34" height="30"/><text x="115" y="112" text-anchor="middle" class="t-num">1</text>
+          <rect class="cell"    x="132" y="92" width="34" height="30"/><text x="149" y="112" text-anchor="middle" class="t-num">0</text>
+          <rect class="cell"    x="166" y="92" width="34" height="30"/><text x="183" y="112" text-anchor="middle" class="t-num">0</text>
+          <rect class="cell"    x="200" y="92" width="34" height="30" style="stroke:var(--teal);stroke-width:2.5"/><text x="217" y="112" text-anchor="middle" class="t-num t-teal">0</text>
+          <rect class="cell on" x="234" y="92" width="34" height="30"/><text x="251" y="112" text-anchor="middle" class="t-num">1</text>
+          <rect class="cell"    x="268" y="92" width="34" height="30"/><text x="285" y="112" text-anchor="middle" class="t-num">0</text>
+          <text x="170" y="142" text-anchor="middle" class="t-teal">definitely NOT in the set · 100% certain</text>
+        </svg>
+        <figcaption>A 0 bit is proof. Had dog been added, that bit would be 1.</figcaption>
+      </figure>
+      <figure style="margin:0">
+        <p class="cap">check(elephant) → bit 6 → 1</p>
+        <svg class="dia" viewBox="0 0 340 150" role="img" aria-label="elephant hashes to bit 6, which ball set to one, so the filter says maybe although elephant was never added.">
+          <path class="wire red" d="M118 44C150 44 190 74 230 74" marker-end="url(#ah-red)"/>
+          <rect class="node" x="14" y="24" width="104" height="40" rx="10"/>
+          <text x="66" y="49" text-anchor="middle" class="t-mono">elephant</text>
+          <text x="178" y="40" text-anchor="middle" class="t-mono t-red">→ 6</text>
+          <rect class="cell"    x="30"  y="92" width="34" height="30"/><text x="47"  y="112" text-anchor="middle" class="t-num">0</text>
+          <rect class="cell"    x="64"  y="92" width="34" height="30"/><text x="81"  y="112" text-anchor="middle" class="t-num">0</text>
+          <rect class="cell on" x="98"  y="92" width="34" height="30"/><text x="115" y="112" text-anchor="middle" class="t-num">1</text>
+          <rect class="cell"    x="132" y="92" width="34" height="30"/><text x="149" y="112" text-anchor="middle" class="t-num">0</text>
+          <rect class="cell"    x="166" y="92" width="34" height="30"/><text x="183" y="112" text-anchor="middle" class="t-num">0</text>
+          <rect class="cell"    x="200" y="92" width="34" height="30"/><text x="217" y="112" text-anchor="middle" class="t-num">0</text>
+          <rect class="cell on" x="234" y="92" width="34" height="30" style="stroke:var(--red);stroke-width:2.5"/><text x="251" y="112" text-anchor="middle" class="t-num t-red">1</text>
+          <rect class="cell"    x="268" y="92" width="34" height="30"/><text x="285" y="112" text-anchor="middle" class="t-num">0</text>
+          <text x="170" y="142" text-anchor="middle" class="t-red">“may be present” · a false positive here</text>
+        </svg>
+        <figcaption>A 1 bit is not proof: ball put it there. The filter can only say “maybe”.</figcaption>
+      </figure>
+    </div>
+
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>The filter says</th><th>What it means</th><th>What you do</th></tr></thead>
+        <tbody>
+          <tr><th>No</th><td>The item was never added. 100% certain.</td><td>Trust it. For Reels: safe to recommend.</td></tr>
+          <tr><th>Yes</th><td>The item <em>may</em> have been added. Sometimes wrong.</td><td>If being wrong matters, check the real store. For Reels: just skip it, no check needed.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>Notice the second row for the recommendation case. Instagram does not go and verify a “yes”. It simply does not recommend that Reel. The cost of a false positive is one missed recommendation out of thousands, which nobody notices. What matters is that everything it <em>does</em> show is guaranteed new. That is exactly the situation where Bloom filters shine: <strong>the “no” is what you are buying.</strong></p>
+    </div>
+    <div class="callout key">
+      <span class="cap">Remember it this way</span>
+      <p>No false negatives, ever. Some false positives, by design. Space and time efficiency in exchange for a little correctness on one side only.</p>
+    </div>
+  </section>
+
+  <!-- 5 -->
+  <section id="fill" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">5</span>
+      <div>
+        <h2>Filling up, sizing, and why it cannot grow</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 10:07</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <h3>The false positive rate rises as you add</h3>
+      <p>Every item you add switches on bits. Keep adding and more and more bits are 1. Eventually all of them are 1, and then the filter says “yes” to every word you give it. Useless. So the <span class="term">false positive rate</span> is not a fixed property of a filter; it starts near zero and climbs with the number of items inserted.</p>
+      <p>Here is that curve measured on a real filter (the one from the lab in section 8), sized for 1,000 items:</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>Items added</th><th>Bits set to 1</th><th>Wrong “yes” answers</th></tr></thead>
+        <tbody>
+          <tr><th>250</th><td>17%</td><td>0.01%</td></tr>
+          <tr><th>500</th><td>31%</td><td>0.05%</td></tr>
+          <tr><th>1,000 (designed for)</th><td>52%</td><td>1.0%</td></tr>
+          <tr><th>2,000</th><td>77%</td><td>15.6%</td></tr>
+          <tr><th>4,000</th><td>95%</td><td>68%</td></tr>
+          <tr><th>8,000</th><td>100%</td><td>98%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>At the designed load it behaves. At double the load it is already bad. At four times it is almost always wrong.</p>
+
+      <h3>Size is fixed at creation <span class="ts">▶ 10:50</span></h3>
+      <p>A Bloom filter is not something that grows on its own. When you create it you say how big it is. The lesson’s example is 1 KB: 1,024 bytes, so 8,192 bits. That is the whole filter, for ever.</p>
+      <p>So you must <strong>tune the size to the number of keys</strong> you will put in and the false positive rate you can accept. There is a standard formula for this; the lesson leaves it for you to look up, and section 7.1 gives it along with a rule of thumb.</p>
+
+      <h3>Why you cannot grow or empty it <span class="ts">▶ 12:12</span></h3>
+      <p>Say you started at 1 KB, inserted a million keys, and the false positive rate is now terrible. Two things you might want to do, and why neither works:</p>
+      <ul>
+        <li><strong>Take some items out.</strong> Impossible. Bits are shared between items (apple and cat both set bit 2). Clearing a bit for one item would wrongly remove others, which would break the one guarantee the filter has.</li>
+        <li><strong>Make it bigger.</strong> Also impossible. Every position was computed as <code>hash mod 8</code>. Change the size to 16 and the same word now maps to a different bit. All existing bits are meaningless under the new mapping. This is the limitation of anything hash-based.</li>
+      </ul>
+      <p>What you actually do is <strong>recreate it</strong>: make a new, larger filter, then go through <em>all</em> the keys again and insert them into the new one. Where do the keys come from? Not from the old filter; it does not have them. They come from the real database. The Bloom filter is never the <span class="term">source of truth</span>. The list of Reels a user watched lives in a database somewhere. The filter is an auxiliary structure that makes checks fast. Rebuilding it means iterating the source of truth and re-inserting.</p>
+      <p>That is slow and fiddly, so in practice you <strong>over-provision</strong>: you know roughly how many keys you will store and what false positive rate you can tolerate, so you size the filter with room to spare from day one.</p>
+    </div>
+    <div class="callout warn">
+      <span class="cap">The three cannots</span>
+      <p>Cannot remove an item. Cannot grow. Cannot list what is inside. If your design needs any of these, see the variants in section 7.5, or do not use a Bloom filter.</p>
+    </div>
+  </section>
+
+  <!-- 6 -->
+  <section id="use" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">6</span>
+      <div>
+        <h2>Redis, and where to use it</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 14:30</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <h3>You do not have to build it</h3>
+      <p>Redis offers Bloom filters as a native data structure (through its RedisBloom module). You create a filter, giving it the expected number of items and the error rate you want, add keys, and check keys. Use it as a black box. The lesson corrects itself on one point: Redis will <em>not</em> magically manage growth for you, so you still have to size it, and if it outgrows that size, re-ingesting the keys is your job. (Section 7.4 has the finer print on what Redis does when a filter fills.)</p>
+
+      <h3>When a Bloom filter is the right tool <span class="ts">▶ 15:49</span></h3>
+    </div>
+    <div class="grid-2">
+      <div class="card teal">
+        <span class="k">Use it when</span>
+        <h3>All four are true</h3>
+        <ul>
+          <li>You insert but never remove.</li>
+          <li>You need very fast checks.</li>
+          <li>You need a “no” you can trust 100%.</li>
+          <li>An occasional wrong “yes” is acceptable.</li>
+        </ul>
+      </div>
+      <div class="card red">
+        <span class="k">Do not use it when</span>
+        <h3>A wrong “yes” would hurt</h3>
+        <p>If the filter saying “exists” about something that does not exist is not OK for you, a Bloom filter is not for you. That is the whole limitation, and it is a hard one.</p>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson’s examples, all of them “show the user only things they have not seen”:</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>Where</th><th>What goes in the filter</th><th>Why a false “yes” is fine</th></tr></thead>
+        <tbody>
+          <tr><th>Medium recommendations</th><td>Every article a user has read</td><td>One article out of thousands is not suggested. Nobody notices.</td></tr>
+          <tr><th>Web crawler</th><td>Every URL already visited</td><td>One page out of millions is not re-crawled. Fine.</td></tr>
+          <tr><th>Feed generation</th><td>Posts already shown to the user</td><td>A post is skipped. The feed is still full of new posts.</td></tr>
+          <tr><th>Tinder</th><td>Profiles the user has swiped on</td><td>Out of 100,000 people, missing 10 or 100 does not matter. Never showing a swiped profile again does.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>The lesson’s exercise: run Redis locally, read its Bloom filter docs, write a small script that inserts random keys, and <em>produce a false positive on purpose</em>. The lab in section 8 does this. The lesson also points to the author’s repository <code>github.com/arpitbhayani/abloom</code>, a Go implementation with several variants and benchmarks of how the false positive rate changes as keys are added.</p>
+    </div>
+  </section>
+
+  <!-- 7 -->
+  <section id="deeper" class="extra">
+    <div class="sec-head">
+      <span class="sec-num">7</span>
+      <div>
+        <h2>Going deeper</h2>
+        <div class="sec-meta"><span class="badge">Extra depth · not in the video</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson uses one hash function and leaves sizing “a Google search away”. These are the next things an interviewer will ask about.</p>
+
+      <h3>7.1 · Why real filters use several hash functions</h3>
+      <p>With one hash function, an item switches on one bit, and a stranger gets a false “yes” whenever its single bit happens to be set. If a third of the bits are set, a third of all strangers get a wrong “yes”. That is a lot.</p>
+      <p>Real filters use <strong>k</strong> hash functions. An item sets k bits; a stranger must hit k set bits <em>at the same time</em> to get a wrong “yes”. With k = 7, even when half the bits are set, the chance is ½ × ½ × … seven times ≈ 1%. More hash functions means fewer false positives, up to a point: each extra hash also fills the array faster. The best k for a given size and item count is:</p>
+    </div>
+    <div class="panel" style="max-width:70ch">
+      <p style="margin:0;font-family:'IBM Plex Mono',monospace;font-size:.92rem;line-height:1.9">
+        bits needed &nbsp;&nbsp; <strong>m = −n · ln(p) / (ln 2)²</strong><br>
+        hash functions <strong>k = (m / n) · ln 2</strong><br>
+        <span style="color:var(--muted)">n = items you will insert · p = false positive rate you accept</span>
+      </p>
+    </div>
+    <div class="prose"><p>You do not need to remember the formula. Remember the table it produces:</p></div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>Bits per item</th><th>Hash functions (k)</th><th>False positive rate</th><th>1 million items cost</th></tr></thead>
+        <tbody>
+          <tr><th>~5</th><td>3</td><td>10%</td><td>0.6 MB</td></tr>
+          <tr><th>~10</th><td>7</td><td>1%</td><td>1.2 MB</td></tr>
+          <tr><th>~15</th><td>10</td><td>0.1%</td><td>1.8 MB</td></tr>
+          <tr><th>~20</th><td>13</td><td>0.01%</td><td>2.4 MB</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout key">
+      <span class="cap">The rule of thumb to say out loud</span>
+      <p><strong>About 10 bits per item gives about 1% false positives.</strong> Every extra ~5 bits per item cuts the rate by 10×. So 100 million items at 1% is 1 billion bits = 120 MB, which fits in memory on one machine. A hash set of the same 100 million 8-byte IDs would need several gigabytes.</p>
+    </div>
+    <div class="prose">
+      <p>Two practical details. First, use a <strong>fast, non-cryptographic hash</strong> such as MurmurHash3 or xxHash; MD5 and SHA work but cost more CPU for no benefit here. Second, you do not run k different hash functions. You compute two hashes h1 and h2 and derive the rest as <code>h1 + i·h2</code> for i = 0 … k−1 (the “double hashing” trick). The lab does exactly this.</p>
+
+      <h3>7.2 · Where the filter lives</h3>
+      <p>The lesson puts it in Redis. There are two sensible places, and interviewers like to hear you weigh them.</p>
+    </div>
+    <div class="grid-2">
+      <figure style="margin:0">
+        <p class="cap">A · inside each API server</p>
+        <svg class="dia" viewBox="0 0 340 170" role="img" aria-label="Three API servers each hold their own copy of the Bloom filter in memory and consult the database behind them.">
+          <path class="wire" d="M120 40C140 40 140 85 160 85" marker-end="url(#ah)"/>
+          <path class="wire" d="M120 85H160" marker-end="url(#ah)"/>
+          <path class="wire" d="M120 130C140 130 140 85 160 85" marker-end="url(#ah)"/>
+          <rect class="node" x="14" y="22" width="106" height="36" rx="10"/><text x="67" y="45" text-anchor="middle">API 1 · <tspan class="t-accent">BF</tspan></text>
+          <rect class="node" x="14" y="67" width="106" height="36" rx="10"/><text x="67" y="90" text-anchor="middle">API 2 · <tspan class="t-accent">BF</tspan></text>
+          <rect class="node" x="14" y="112" width="106" height="36" rx="10"/><text x="67" y="135" text-anchor="middle">API 3 · <tspan class="t-accent">BF</tspan></text>
+          <rect class="node main" x="160" y="62" width="110" height="46" rx="10"/><text x="215" y="90" text-anchor="middle">Database</text>
+          <text x="67" y="14" text-anchor="middle" class="t-teal">~100 ns per check</text>
+          <text x="215" y="134" text-anchor="middle" class="t-red">3 copies to keep in sync</text>
+        </svg>
+        <figcaption>Fastest possible. But each server builds its own copy at start-up, and an add on server 1 is not seen by server 2 until they sync. Good for data that changes slowly (a list of blocked URLs, keys present in a file).</figcaption>
+      </figure>
+      <figure style="margin:0">
+        <p class="cap">B · one shared filter in Redis</p>
+        <svg class="dia" viewBox="0 0 340 170" role="img" aria-label="Three API servers share one Bloom filter stored in Redis, with the database behind it.">
+          <path class="wire" d="M100 40C130 40 130 85 160 85" marker-end="url(#ah)"/>
+          <path class="wire" d="M100 85H160" marker-end="url(#ah)"/>
+          <path class="wire" d="M100 130C130 130 130 85 160 85" marker-end="url(#ah)"/>
+          <path class="wire dash" d="M256 85H286" marker-end="url(#ah)"/>
+          <rect class="node" x="14" y="22" width="86" height="36" rx="10"/><text x="57" y="45" text-anchor="middle">API 1</text>
+          <rect class="node" x="14" y="67" width="86" height="36" rx="10"/><text x="57" y="90" text-anchor="middle">API 2</text>
+          <rect class="node" x="14" y="112" width="86" height="36" rx="10"/><text x="57" y="135" text-anchor="middle">API 3</text>
+          <rect class="node copy" x="160" y="62" width="96" height="46" rx="10"/><text x="208" y="85" text-anchor="middle" class="t-b">Redis</text><text x="208" y="101" text-anchor="middle" class="t-mono">BF.EXISTS</text>
+          <rect class="node main" x="286" y="62" width="48" height="46" rx="10"/><text x="310" y="90" text-anchor="middle">DB</text>
+          <text x="208" y="18" text-anchor="middle" class="t-teal">~0.5 ms · one copy · survives restarts</text>
+          <text x="208" y="134" text-anchor="middle" class="t-red">a network hop per check</text>
+        </svg>
+        <figcaption>One copy, every server sees every add at once, and it is still there after a deploy. The cost is a network round trip. This is the right default for per-user state like “seen Reels”, which changes with every view.</figcaption>
+      </figure>
+    </div>
+    <div class="prose">
+      <p>For the Reels problem you also choose between <strong>one filter per user</strong> (key <code>seen:{user_id}</code>, small, rebuilt from that user’s history alone) and <strong>one giant filter</strong> with <code>user_id:post_id</code> as the item. Per user is the usual choice: a filter that is too full only hurts one user, and inactive users’ filters can be dropped and rebuilt on demand.</p>
+
+      <h3>7.3 · What “full” looks like in production, and the rotation trick</h3>
+      <p>A filter past its design capacity does not crash and does not lie in the dangerous direction. It just says “maybe” more and more often. What that costs depends on the job:</p>
+      <ul>
+        <li><strong>In front of a database or disk:</strong> a saturated filter sends every lookup through. The system becomes exactly as slow as if the filter were not there. Slow, not wrong.</li>
+        <li><strong>In a recommender or feed:</strong> every candidate looks “already seen”, so nothing is recommended. The feed quietly goes empty. This is the silent failure to watch for: monitor the fill level (Redis reports it in <code>BF.INFO</code>) and alert well before capacity.</li>
+      </ul>
+      <p>When a filter does need replacing, do it without downtime:</p>
+    </div>
+    <ol class="step-list">
+      <li><b>Build the new filter on the side</b><p>Create <code>seen:42:new</code> with a larger capacity. Read the user’s full history from the database (the source of truth) and insert every ID.</p></li>
+      <li><b>Keep both up to date while you build</b><p>New views during the rebuild are added to both the old and the new filter, so the new one is not missing anything when it goes live.</p></li>
+      <li><b>Swap atomically</b><p>In Redis, <code>RENAME seen:42:new seen:42</code> replaces the old key in one step. Readers never see a half-built filter and never see a missing one.</p></li>
+    </ol>
+    <div class="prose">
+      <p>One finer point on Redis. The lesson says Redis cannot grow a filter. Strictly, RedisBloom creates a <em>scalable</em> filter by default: when the first filter reaches its capacity it adds a second, larger sub-filter behind it, and a check now consults both. So the key keeps accepting adds, at the price of slower checks and more memory per item. The lesson’s point still holds: nothing is ever removed, the first filter stays as full as it was, and if you got the initial capacity badly wrong you still want the rotation above.</p>
+
+      <h3>7.4 · Where you have already met it</h3>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>System</th><th>What the filter does there</th></tr></thead>
+        <tbody>
+          <tr><th>Cassandra, HBase, RocksDB, LevelDB</th><td>These databases write data into many files on disk. Each file has its own Bloom filter of the keys it holds. A read for a key checks the filters first and opens only the files that say “maybe”, instead of every file. This is the single biggest use of Bloom filters in the world, and the classic “deep dive” answer when an interviewer asks how a key-value store reads fast.</td></tr>
+          <tr><th>CDNs and caches (Akamai)</th><td>Most objects are requested exactly once. Caching them wastes space. A filter remembers what has been requested before, and an object is cached only on its <em>second</em> request. Akamai reported this removed about three quarters of one-time objects from its caches.</td></tr>
+          <tr><th>Web crawlers</th><td>“Have I fetched this URL?” across billions of URLs, as in the lesson.</td></tr>
+          <tr><th>Medium, Instagram-style feeds, Tinder</th><td>Per-user “already shown” filters, as in the lesson.</td></tr>
+          <tr><th>Browsers (Safe Browsing, historically)</th><td>A local filter of known-bad URLs. “No” means the site is safe and the browser carries on; “maybe” triggers a real check with the server. The common case never leaves the machine.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="prose">
+      <h3>7.5 · When you need something it cannot do</h3>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>You need</th><th>Use instead</th><th>The cost</th></tr></thead>
+        <tbody>
+          <tr><th>Delete</th><td><strong>Counting Bloom filter</strong>: each cell is a small counter (say 4 bits) instead of a bit. Add increments, delete decrements.</td><td>About 4× the memory. A counter can overflow if sized badly.</td></tr>
+          <tr><th>Delete, and tighter space</th><td><strong>Cuckoo filter</strong>: stores short fingerprints in buckets. Supports delete and beats a Bloom filter on space below about 3% false positives.</td><td>Inserts can fail when it is nearly full. Slightly more complex.</td></tr>
+          <tr><th>Unknown final size</th><td><strong>Scalable Bloom filter</strong>: a chain of filters, each larger than the last (what RedisBloom does by default).</td><td>A check touches every filter in the chain, so checks get slower as it grows.</td></tr>
+          <tr><th>Exact answers, and the keys are small integers</th><td><strong>Plain bitmap</strong>: one bit per possible ID, no hashing at all. 1 billion user IDs = 125 MB, exact, with delete. Redis <code>SETBIT</code>/<code>GETBIT</code>.</td><td>Only works when IDs are dense integers in a known range. Useless for URLs or strings.</td></tr>
+          <tr><th>Exact answers, listing, any key type</th><td><strong>A set</strong>, in Redis or your database.</td><td>Stores every key: 10 to 50× the memory of a Bloom filter.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="prose">
+      <h3>7.6 · Limits worth saying out loud</h3>
+      <ul>
+        <li><strong>It is a cache of a fact, not the fact.</strong> If the filter is lost, nothing is lost; rebuild it from the database. Design the rebuild path before you need it.</li>
+        <li><strong>Size and hash functions are a contract.</strong> Two filters can only be merged (bit-wise OR gives the union) if they have the same size and the same hashes. Decide them once.</li>
+        <li><strong>It balances no load and orders nothing.</strong> It cannot count how many times an item was added (that is a count-min sketch) or tell you which items are inside.</li>
+        <li><strong>Hostile input.</strong> Someone who knows your hash function can craft keys that collide and inflate false positives. Where that matters, seed the hash with a secret.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 8 -->
+  <section id="lab" class="lab">
+    <div class="sec-head">
+      <span class="sec-num">8</span>
+      <div>
+        <h2>Hands-on lab</h2>
+        <div class="sec-meta"><span class="badge">Exercise from the video</span><span class="ts">▶ 18:25 · code added here</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson’s exercise is to insert random keys into a Bloom filter and catch a false positive. Two versions below: one you build yourself in 30 lines (so the formula and the k hashes are not magic), and the Redis one the lesson asks for.</p>
+    </div>
+
+    <ol class="step-list">
+      <li>
+        <b>Save this as <code>bloom.py</code></b>
+        <p>A filter sized by the formula from section 7.1. It inserts keys past its design capacity and measures the false positive rate against 20,000 keys that were never added.</p>
+<pre><code>import hashlib, math, random
+
+class BloomFilter:
+    def __init__(self, n, p):
+        <span class="c"># size the bit array for n items at false-positive rate p (the standard formula)</span>
+        self.m = math.ceil(-n * math.log(p) / (math.log(2) ** 2))   <span class="c"># number of bits</span>
+        self.k = max(1, round(self.m / n * math.log(2)))             <span class="c"># number of hash functions</span>
+        self.bits = bytearray((self.m + 7) // 8)                     <span class="c"># m bits, all 0</span>
+        self.count = 0
+
+    def _positions(self, item):
+        <span class="c"># one 128-bit hash, split into two halves; k positions = h1 + i*h2 (double hashing)</span>
+        d = hashlib.blake2b(item.encode(), digest_size=16).digest()
+        h1, h2 = int.from_bytes(d[:8], "big"), int.from_bytes(d[8:], "big") | 1
+        return [(h1 + i * h2) % self.m for i in range(self.k)]
+
+    def add(self, item):
+        for pos in self._positions(item):
+            self.bits[pos // 8] |= 1 &lt;&lt; (pos % 8)
+        self.count += 1
+
+    def might_contain(self, item):
+        return all(self.bits[pos // 8] &gt;&gt; (pos % 8) &amp; 1 for pos in self._positions(item))
+
+random.seed(1)
+bf = BloomFilter(n=1000, p=0.01)
+print(f"sized for 1,000 items at 1% -&gt; m = {bf.m} bits ({bf.m // 8} bytes), k = {bf.k} hashes")
+
+never_added = [f"ghost-{i}" for i in range(20000)]      <span class="c"># we will never add these</span>
+print(f"{'items added':&gt;12} {'bits set':&gt;9} {'false positives':&gt;16}")
+for target in (250, 500, 1000, 2000, 4000, 8000):
+    while bf.count &lt; target:
+        bf.add(f"user-{bf.count}")
+    fp = sum(bf.might_contain(x) for x in never_added) / len(never_added)
+    ones = sum(bin(b).count("1") for b in bf.bits) / bf.m
+    print(f"{bf.count:&gt;12,} {ones:&gt;8.0%} {fp:&gt;15.2%}")
+
+print("false negatives:", sum(not bf.might_contain(f"user-{i}") for i in range(bf.count)))</code></pre>
+      </li>
+      <li>
+        <b>Run it</b>
+        <p>Nothing to install. The whole filter for 1,000 items is 1,198 bytes.</p>
+<pre><code>python3 bloom.py</code></pre>
+<pre><code><span class="o">sized for 1,000 items at 1% -&gt; m = 9586 bits (1198 bytes), k = 7 hashes
+ items added  bits set  false positives
+         250      17%           0.01%
+         500      31%           0.05%
+       1,000      52%           1.03%
+       2,000      77%          15.59%
+       4,000      95%          68.22%
+       8,000     100%          98.37%
+false negatives: 0</span></code></pre>
+      </li>
+      <li>
+        <b>Notice three things</b>
+        <p>At the designed 1,000 items the rate is 1.03%, almost exactly what the formula promised, with about half the bits set. Doubling the items makes it 15× worse. And the last line is the guarantee: of 8,000 added keys, not one was reported missing.</p>
+      </li>
+      <li>
+        <b>Now the Redis version the lesson asks for</b>
+        <p>Redis Stack ships with the Bloom filter module. Start it in Docker and talk to it with <code>redis-cli</code>.</p>
+<pre><code>docker run -d --name redis-bf -p 6379:6379 redis/redis-stack-server:latest
+docker exec -it redis-bf redis-cli</code></pre>
+<pre><code><span class="c"># create a filter for user 42: 1% error rate, room for 1,000 items</span>
+BF.RESERVE seen:42 0.01 1000
+<span class="o">OK</span>
+BF.ADD seen:42 reel:8812
+<span class="o">(integer) 1</span>          <span class="c"># 1 = newly added</span>
+BF.ADD seen:42 reel:8812
+<span class="o">(integer) 0</span>          <span class="c"># 0 = was (probably) already there</span>
+BF.MADD seen:42 reel:17 reel:203 reel:981
+<span class="o">1) (integer) 1
+2) (integer) 1
+3) (integer) 1</span>
+BF.EXISTS seen:42 reel:8812
+<span class="o">(integer) 1</span>          <span class="c"># maybe seen -&gt; do not recommend</span>
+BF.EXISTS seen:42 reel:8813
+<span class="o">(integer) 0</span>          <span class="c"># definitely not seen -&gt; safe to recommend</span>
+BF.MEXISTS seen:42 reel:17 reel:18 reel:19
+<span class="o">1) (integer) 1
+2) (integer) 0
+3) (integer) 0</span>
+BF.INFO seen:42
+<span class="o"> 1) Capacity
+ 2) (integer) 1000
+ 3) Size
+ 4) (integer) ...
+ 5) Number of filters
+ 6) (integer) 1
+ 7) Number of items inserted
+ 8) (integer) 4
+ 9) Expansion rate
+10) (integer) 2</span></code></pre>
+        <p>“Number of items inserted” against “Capacity” is the fill level to monitor. “Expansion rate 2” is the scalable behaviour from section 7.3: when full, Redis adds a second sub-filter twice the size.</p>
+      </li>
+      <li>
+        <b>Catch a false positive, as the lesson asks</b>
+        <p>Reserve a tiny filter, add 100 random keys, then probe keys you never added until one comes back as 1. With a 1% filter you need about 100 probes; with <code>BF.RESERVE tiny 0.1 100</code> you need about 10.</p>
+<pre><code>for i in $(seq 1 100);  do redis-cli BF.ADD tiny "in-$i" &gt; /dev/null; done
+for i in $(seq 1 1000); do [ "$(redis-cli BF.EXISTS tiny "out-$i")" = "1" ] &amp;&amp; echo "false positive: out-$i"; done</code></pre>
+      </li>
+    </ol>
+
+    <div class="callout key">
+      <span class="cap">Try next</span>
+      <p>Change <code>p=0.01</code> to <code>0.001</code> and watch <code>m</code> and <code>k</code> grow (about 15 bits per item, 10 hashes). Set <code>k = 1</code> by hand and re-run to see why one hash function is not enough. Then implement the rotation from section 7.3: keep a Python list as the “database”, build a second, larger filter from it, and swap.</p>
+    </div>
+  </section>
+
+  <!-- 9 -->
+  <section id="interview" class="extra">
+    <div class="sec-head">
+      <span class="sec-num">9</span>
+      <div>
+        <h2>In the interview</h2>
+        <div class="sec-meta"><span class="badge">Extra depth · not in the video</span></div>
+      </div>
+    </div>
+    <div class="callout say">
+      <span class="cap">What to say when a lookup is expensive and most answers are “no”</span>
+      <p>“Most of these checks will come back ‘not seen’, so I’d put a Bloom filter in front. It’s a bit array of about 10 bits per item, which gives roughly 1% false positives: it can say ‘maybe’ for something that isn’t there, but it never says ‘no’ for something that is. For this use case a wrong ‘maybe’ only costs us one skipped item, so we never need to verify it. I’d keep one filter per user in Redis, sized for a few thousand items, monitor the fill level, and rebuild it from the database when it gets full, since a Bloom filter can’t be grown or have items removed.”</p>
+    </div>
+
+    <div class="prose">
+      <h3>A worked design question</h3>
+      <p><strong>“Design the ‘never show a post the user has already seen’ feature for a feed with 500 million users.”</strong> Walk it in the lesson’s order: numbers, then the picture, then the trade-offs.</p>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <span class="k">1 · Numbers</span>
+        <h3>Per user, then total</h3>
+        <ul>
+          <li>Keep the last ~5,000 seen posts per user. At 10 bits each: ~6 KB per filter.</li>
+          <li>500M users × 6 KB = 3 TB. Too much to keep hot for everyone.</li>
+          <li>But only ~50M are active on a given day: 50M × 6 KB = 300 GB. That fits a Redis cluster of 10–15 nodes.</li>
+        </ul>
+      </div>
+      <div class="card teal">
+        <span class="k">2 · The read path</span>
+        <h3>One round trip per feed</h3>
+        <ul>
+          <li>Feed service ranks ~1,000 candidate posts.</li>
+          <li>One <code>BF.MEXISTS seen:{uid} …</code> call checks all 1,000 at once.</li>
+          <li>Drop every “maybe”. Serve the rest. The user never sees a repeat.</li>
+        </ul>
+      </div>
+      <div class="card amber">
+        <span class="k">3 · The write path</span>
+        <h3>Two writes per view</h3>
+        <ul>
+          <li>On “post shown”: <code>BF.ADD seen:{uid} post</code> and append to the views table in the database.</li>
+          <li>The database is the truth; the filter is rebuilt from it if lost or full.</li>
+        </ul>
+      </div>
+      <div class="card red">
+        <span class="k">4 · Trade-offs to name</span>
+        <h3>Say them before being asked</h3>
+        <ul>
+          <li>1% of fresh posts are wrongly skipped. Acceptable; tune p if not.</li>
+          <li>Filters of inactive users expire from Redis and are rebuilt from the database on their next visit.</li>
+          <li>A full filter means an empty feed, so alert on fill level and rotate (section 7.3).</li>
+        </ul>
+      </div>
+    </div>
+
+    <figure>
+      <p class="cap">The picture for the worked question</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 230" role="img" aria-label="A feed service gets 1,000 candidate posts from the ranker, checks them all against the user's Bloom filter in Redis with one call, drops the maybes and serves the rest. When a post is shown it is added to the filter and to the views table in the database, which is the source of truth and is used to rebuild the filter.">
+          <path class="wire" d="M136 70H190" marker-end="url(#ah)"/>
+          <path class="wire" d="M340 70H404" marker-end="url(#ah)"/>
+          <path class="wire" d="M404 90H340" marker-end="url(#ah)"/>
+          <path class="wire teal" d="M265 100V140" marker-end="url(#ah-teal)"/>
+          <path class="wire accent" d="M340 160H404" marker-end="url(#ah-accent)"/>
+          <path class="wire accent" d="M340 172C420 172 560 172 610 124" marker-end="url(#ah-accent)"/>
+          <path class="wire dash" d="M600 56C580 40 560 36 540 48" marker-end="url(#ah)"/>
+          <text x="163" y="60" text-anchor="middle" class="t-mono t-muted">1,000</text>
+          <text x="372" y="30" text-anchor="middle" class="t-mono t-muted">BF.MEXISTS</text>
+          <text x="372" y="118" text-anchor="middle" class="t-mono t-muted">1 / 0 each</text>
+          <text x="372" y="148" text-anchor="middle" class="t-mono t-accent">BF.ADD</text>
+          <text x="520" y="190" text-anchor="middle" class="t-mono t-accent">INSERT view</text>
+          <text x="570" y="24" text-anchor="middle" class="t-mono t-muted">rebuild from truth</text>
+
+          <rect class="node" x="16" y="47" width="120" height="46" rx="10"/>
+          <text x="76" y="75" text-anchor="middle">Ranker</text>
+          <rect class="node main" x="190" y="40" width="150" height="60" rx="10"/>
+          <text x="265" y="65" text-anchor="middle" class="t-b">Feed service</text>
+          <text x="265" y="84" text-anchor="middle" class="t-muted">drop every “maybe”</text>
+          <rect class="node copy" x="404" y="40" width="136" height="60" rx="10"/>
+          <text x="472" y="65" text-anchor="middle" class="t-b">Redis cluster</text>
+          <text x="472" y="84" text-anchor="middle" class="t-mono">seen:{uid} · 6 KB</text>
+          <rect class="node" x="190" y="140" width="150" height="46" rx="10"/>
+          <text x="265" y="168" text-anchor="middle">post shown → event</text>
+          <rect class="node" x="600" y="40" width="144" height="80" rx="10"/>
+          <text x="672" y="68" text-anchor="middle" class="t-b">Database</text>
+          <text x="672" y="88" text-anchor="middle" class="t-muted">views(user, post, at)</text>
+          <text x="672" y="106" text-anchor="middle" class="t-teal">source of truth</text>
+          <text x="265" y="215" text-anchor="middle" class="t-muted">the filter is a fast opinion; the database is the fact</text>
+        </svg>
+      </div>
+    </figure>
+
+    <div class="prose"><p>Likely follow-ups. Answer each out loud before opening it.</p></div>
+
+    <details class="qa">
+      <summary>What is a Bloom filter, in two sentences?</summary>
+      <div class="a">
+        <p>A bit array plus a few hash functions that remembers whether items were added without storing the items. It answers “definitely not in the set” or “probably in the set”, never a false “no”, but sometimes a false “yes”.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Why can it never give a false negative?</summary>
+      <div class="a">
+        <p>Adding an item sets all k of its bits to 1, and bits are never cleared. So any item that was added still has all its bits set, and a check on it must return “yes”.</p>
+        <p>The only ways to break this are to clear bits (deletes) or to rebuild the filter from an incomplete list, which is why you rebuild from the source of truth.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Why can you not delete from it?</summary>
+      <div class="a">
+        <p>Bits are shared. In the lesson, apple and cat both set bit 2. Clearing bit 2 to remove cat would also make apple disappear, and that is a false negative, the one thing the structure promises never to do.</p>
+        <p>If you need deletes, use a counting Bloom filter (counters instead of bits, about 4× the memory) or a cuckoo filter.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>How do you size it?</summary>
+      <div class="a">
+        <p>From two inputs: how many items you will insert, and the false positive rate you accept. About 10 bits per item gives 1%; about 15 gives 0.1%. The optimal number of hash functions is around 0.7 × bits-per-item, so 7 for 1%.</p>
+        <p>Then over-provision, because the rate climbs steeply past the designed capacity and the filter cannot be grown.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Why not just one hash function, like the lesson’s example?</summary>
+      <div class="a">
+        <p>With one hash, a stranger is wrongly accepted whenever its single bit is set, so the false positive rate equals the fraction of bits set, which is high.</p>
+        <p>With k hashes a stranger must hit k set bits at once, which is far less likely. At the same memory, 7 hashes turn a ~50% error rate into ~1%.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>What happens when it fills up, and how do you handle it?</summary>
+      <div class="a">
+        <p>It does not fail, it degrades: more and more “maybe” answers. In front of a database that means more real lookups; in a recommender it means fewer and eventually zero recommendations.</p>
+        <p>Handle it by monitoring the fill level, over-provisioning, and rotating: build a larger filter from the source of truth, add new items to both during the build, then swap atomically.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Where would you put it: in the service or in Redis?</summary>
+      <div class="a">
+        <p>In the service’s memory when the data changes slowly and every server can hold its own copy: it is nanoseconds per check. In Redis when the data changes constantly or must be shared, such as per-user “seen” sets: one copy, every server sees every add, and it survives deploys, for one network round trip.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Name three real systems that use one.</summary>
+      <div class="a">
+        <p>Cassandra, HBase and RocksDB keep a filter per data file so a read opens only the files that might contain the key. Akamai’s CDN caches an object only on its second request, using a filter to spot the first. Medium and Instagram-style feeds use per-user filters to avoid showing the same content twice.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Bloom filter, bitmap or set: which when?</summary>
+      <div class="a">
+        <p>Bitmap when the keys are dense integers in a known range, such as user IDs: one bit per ID, exact, deletable. Set when you need exact answers and listing and can pay the memory. Bloom filter when the keys are arbitrary (URLs, strings), the count is huge, and a small false positive rate is acceptable.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Is the Bloom filter a source of truth?</summary>
+      <div class="a">
+        <p>Never. It cannot even list its contents. The real list lives in a database; the filter is a fast, approximate copy of one fact about that list. Losing it costs a rebuild, not data.</p>
+      </div>
+    </details>
+  </section>
+
+  <nav class="lesson-nav" aria-label="Lessons">
+    <a href="22-blob-storage-s3.html"><span>← Lesson 22</span>Blob Storage &amp; S3</a>
+    <a class="next" href="24-consistent-hashing.html"><span>Lesson 24 →</span>Consistent Hashing</a>
+  </nav>
+
+  <footer>
+    <p>Notes on lesson 23, “Bloom Filters” (20 min 28 s). Blue sections follow the video. Amber sections add depth beyond it. The lab script needs only Python 3; the Redis part needs Docker.</p>
+  </footer>
+
+</div>
+
+<script>
+  (function(){
+    var themeBtn = document.getElementById("themeBtn");
+    if (themeBtn) themeBtn.addEventListener("click", function(){
+      var root = document.documentElement;
+      var isDark = root.getAttribute("data-theme") === "dark"
+        || (!root.getAttribute("data-theme") && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+      root.setAttribute("data-theme", isDark ? "light" : "dark");
+    });
+  })();
+</script>
+<script src="../js/vendor/rough.js"></script>
+<script src="../js/sketch.js"></script>
+</body>
+</html>

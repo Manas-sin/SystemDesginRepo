@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Consistent Hashing — notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Patrick+Hand&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../css/notes.css">
+<style>
+  /* page-specific: rings, ticks and key dots */
+  svg.dia .ring{fill:none;stroke:var(--line-strong);stroke-width:2}
+  svg.dia .tick{stroke:var(--line-strong);stroke-width:1.5}
+  svg.dia .arc{fill:none;stroke-width:9;stroke-linecap:butt;opacity:.45}
+  svg.dia .arc.teal{stroke:var(--teal)}
+  svg.dia .arc.amber{stroke:var(--amber)}
+  svg.dia .arc.red{stroke:var(--red)}
+  svg.dia .key{fill:color-mix(in srgb,var(--amber) 35%,var(--surface));stroke:var(--amber);stroke-width:1.5}
+  svg.dia .slot{fill:var(--surface-2);stroke:var(--line-strong);stroke-width:1.5}
+  svg.dia text.t-num{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:14px;font-weight:600}
+  svg.dia text.t-sm{font-size:11px}
+</style>
+</head>
+<body>
+
+<!-- arrowheads shared by every diagram on the page -->
+<svg class="dia" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head teal" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head red" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="ah-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head accent" d="M0 0L10 5L0 10z"/></marker>
+  </defs>
+</svg>
+
+<div class="wrap">
+
+  <header class="hero">
+    <div class="topbar">
+      <p class="eyebrow">Lesson 24 · Data partitioning · Notes</p>
+      <div class="topbar-right">
+        <a class="back" href="../index.html">← Learning plan</a>
+        <button class="toggle" id="themeBtn" type="button">◐ Theme</button>
+      </div>
+    </div>
+    <h1>Consistent Hashing</h1>
+    <p class="lede">When data is spread over many machines, something has to decide which machine owns which key, and keep that answer stable when machines come and go. These notes follow the lesson from plain hash-based routing to the ring, then go deeper on virtual nodes, replication, hot keys and the questions interviewers ask next.</p>
+    <div class="chips">
+      <span class="chip"><b>26 min 27 s</b> video</span>
+      <span class="chip"><b>Blue</b> sections · from the video</span>
+      <span class="chip"><b style="color:var(--amber)">Amber</b> sections · extra depth</span>
+    </div>
+  </header>
+
+  <div class="tldr">
+    <h2>The whole lesson in six lines</h2>
+    <ol>
+      <li>Consistent hashing answers exactly one question: <strong>“which node owns this key?”</strong> It is a function call inside your proxy or load balancer, not a service, and it moves no data by itself.</li>
+      <li>The usual way to pick an owner is <code>hash(key) % N</code>. For <strong>stateless</strong> API servers that is fine: when N changes, any server can still handle any request.</li>
+      <li>For <strong>stateful</strong> nodes, such as a distributed key-value store, it breaks. Change N and most keys are suddenly “owned” by a different node, so you must move them all before you can serve again.</li>
+      <li>Consistent hashing drops the “% N”. Hash the nodes <em>and</em> the keys onto the same number range, bend it into a <strong>ring</strong>. A key belongs to the first node clockwise from it.</li>
+      <li>Add a node and it takes keys only from the node just clockwise of it. Remove a node and its keys go only to that neighbour. Everyone else is untouched, so the operation is: snapshot one node, copy, delete the extras.</li>
+      <li>The implementation is a <strong>sorted array</strong> of node positions plus a <strong>binary search</strong>. The lesson insists you build it yourself; the lab does.</li>
+    </ol>
+  </div>
+
+  <ul class="toc" aria-label="Contents">
+    <li><a href="#sketch"><b>✎</b>The picture to draw</a></li>
+    <li><a href="#ownership"><b>1</b>Ownership by hash</a></li>
+    <li><a href="#stateless"><b>2</b>Stateless: free to change N</a></li>
+    <li><a href="#stateful"><b>3</b>Stateful: the same trick breaks</a></li>
+    <li><a href="#ring"><b>4</b>The ring</a></li>
+    <li><a href="#scale"><b>5</b>Scaling up and down</a></li>
+    <li><a href="#function"><b>6</b>A function, not a service</a></li>
+    <li><a href="#deeper"><b>7</b>Going deeper</a></li>
+    <li><a href="#lab"><b>8</b>Hands-on lab</a></li>
+    <li><a href="#interview"><b>9</b>In the interview</a></li>
+  </ul>
+
+  <section id="sketch" class="sketch-sec">
+    <div class="sec-head">
+      <span class="sec-num">✎</span>
+      <div>
+        <h2>The picture to draw</h2>
+        <div class="sec-meta"><span class="badge">Sketch · editable in Excalidraw</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>Left: the ring with three servers and eight keys, plus a fourth server being added so you can show that only two keys move. Right: why <code>% N</code> fails, what virtual nodes are, and who uses this. Draw the ring whenever you say the words “shard”, “partition” or “distributed cache”, and the interviewer asks what happens when you add a machine.</p>
+    </div>
+    <div class="paper"><button class="zoom-btn" type="button" data-zoom>⤢ Full size</button><div class="paper-scroll"><svg class="sketch" data-sketch="sk" role="img" aria-label="A hash ring with servers S1, S2, S3 and eight keys; each key belongs to the first server clockwise. A new server S4 is added and only the two keys just before it move. Side panels compare hash modulo N with the ring, explain virtual nodes, list systems that use the ring, and show the lookup as a sorted array with binary search. Notes explain each numbered part."></svg></div></div>
+    <p class="paper-foot"><span class="cap">Sketch · lesson 24</span><span><a class="btn ghost" href="../diagrams/24-consistent-hashing.excalidraw" download>Download for Excalidraw</a> &nbsp; open it at excalidraw.com → menu → Open</span></p>
+    <script type="application/json" id="sk" data-sketch-src="diagrams/24-consistent-hashing.excalidraw">{"elements":[{"id":"e5d9189fb","type":"text","x":0,"y":0,"width":462.00000000000006,"height":35.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":62234396,"version":1,"versionNonce":2125157524,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"Lesson 24 · Consistent hashing","originalText":"Lesson 24 · Consistent hashing","fontSize":28,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e393712f","type":"text","x":0,"y":42,"width":1232.0,"height":20.0,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1696757188,"version":1,"versionNonce":600046750,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"Put servers AND keys on the same ring. A key belongs to the first server clockwise. Add or remove a server → only its neighbour’s keys move.","originalText":"Put servers AND keys on the same ring. A key belongs to the first server clockwise. Add or remove a server → only its neighbour’s keys move.","fontSize":16,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e3c725cc7","type":"text","x":20,"y":78,"width":99.00000000000001,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":556572714,"version":1,"versionNonce":415849347,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"A · The ring","originalText":"A · The ring","fontSize":15,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e58a48f13","type":"ellipse","x":130,"y":160,"width":340,"height":340,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1299526165,"version":1,"versionNonce":2054100485,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e2c1165bc","type":"text","x":265.35,"y":318,"width":69.30000000000001,"height":35.0,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":960414117,"version":1,"versionNonce":1736381712,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"hash ring\n0 … 2³²−1","originalText":"hash ring\n0 … 2³²−1","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e77f04f84","type":"text","x":274.975,"y":120,"width":50.050000000000004,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1552905459,"version":1,"versionNonce":2121795575,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"0 / 2³²","originalText":"0 / 2³²","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2cbd0f68","type":"rectangle","x":355.0,"y":162.77568135664544,"width":60,"height":40,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["S1"],"frameId":null,"roundness":{"type":3},"seed":2050848239,"version":1,"versionNonce":2092754982,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e2eac6383","type":"text","x":376.75,"y":172.77568135664544,"width":16.5,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["S1"],"frameId":null,"roundness":null,"seed":172954318,"version":1,"versionNonce":473439233,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"S1","originalText":"S1","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"ed137c45","type":"rectangle","x":355.0,"y":457.22431864335454,"width":60,"height":40,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#b2f2bb","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["S2"],"frameId":null,"roundness":{"type":3},"seed":487147711,"version":1,"versionNonce":1009489084,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e192daaef","type":"text","x":376.75,"y":467.22431864335454,"width":16.5,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["S2"],"frameId":null,"roundness":null,"seed":725285719,"version":1,"versionNonce":438888458,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"S2","originalText":"S2","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e3dc7955b","type":"rectangle","x":102.58268198792464,"y":339.52019020337815,"width":60,"height":40,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#d0bfff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["S3"],"frameId":null,"roundness":{"type":3},"seed":1340172369,"version":1,"versionNonce":2115806099,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e733d4dbb","type":"text","x":124.33268198792464,"y":349.52019020337815,"width":16.5,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["S3"],"frameId":null,"roundness":null,"seed":1310527975,"version":1,"versionNonce":1804821558,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"S3","originalText":"S3","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e3e881b","type":"rectangle","x":184.99999999999994,"y":162.77568135664546,"width":60,"height":40,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffd8a8","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed","roughness":1,"opacity":100,"groupIds":["S4"],"frameId":null,"roundness":{"type":3},"seed":1029661341,"version":1,"versionNonce":1952490402,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e5394c8dd","type":"text","x":191.89999999999995,"y":172.77568135664546,"width":46.2,"height":17.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["S4"],"frameId":null,"roundness":null,"seed":738749192,"version":1,"versionNonce":1717221869,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"S4 new","originalText":"S4 new","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e52522f80","type":"ellipse","x":303.02749249917684,"y":183.52513166333912,"width":18,"height":18,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":182060406,"version":1,"versionNonce":1792394663,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e548e121d","type":"text","x":302.81282021674707,"y":215.4109726060915,"width":13.200000000000001,"height":15.0,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":257491077,"version":1,"versionNonce":1953731525,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"k1","originalText":"k1","fontSize":12,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e31bb8a04","type":"ellipse","x":410.51150572225254,"y":252.0,"width":18,"height":18,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1679982649,"version":1,"versionNonce":1527919545,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e60049a4a","type":"text","x":386.93074360871935,"y":269.0,"width":13.200000000000001,"height":15.0,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":428035153,"version":1,"versionNonce":1026567497,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"k2","originalText":"k2","fontSize":12,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e71cb1ce0","type":"ellipse","x":426.9034699156847,"y":344.9634485180364,"width":18,"height":18,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":383372480,"version":1,"versionNonce":931846999,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e650263d0","type":"text","x":399.75923732531845,"y":341.7540031880285,"width":13.200000000000001,"height":15.0,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1365460771,"version":1,"versionNonce":714075261,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"k3","originalText":"k3","fontSize":12,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"eb1a9e82","type":"ellipse","x":396.71413315041895,"y":409.70469013674244,"width":18,"height":18,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1719755505,"version":1,"versionNonce":2031874606,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e7c5f4419","type":"text","x":376.1327998568496,"y":392.42106184614624,"width":13.200000000000001,"height":15.0,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1550106814,"version":1,"versionNonce":850056704,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"k4","originalText":"k4","fontSize":12,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e3b48d838","type":"ellipse","x":267.0365514819636,"y":456.9034699156847,"width":18,"height":18,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":861971624,"version":1,"versionNonce":1596337780,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e7930a4f7","type":"text","x":274.6459968119715,"y":429.3592373253185,"width":13.200000000000001,"height":15.0,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":182362696,"version":1,"versionNonce":1556493282,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"k5","originalText":"k5","fontSize":12,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e14556529","type":"ellipse","x":185.28586684958105,"y":409.70469013674244,"width":18,"height":18,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":365080080,"version":1,"versionNonce":2132692552,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e1042cb1b","type":"text","x":210.66720014315038,"y":392.42106184614624,"width":13.200000000000001,"height":15.0,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":59160709,"version":1,"versionNonce":324593663,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"k6","originalText":"k6","fontSize":12,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4b9fbcc4","type":"ellipse","x":161.32241833154464,"y":273.80122022105775,"width":18,"height":18,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1943155077,"version":1,"versionNonce":999339856,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e673b74fb","type":"text","x":191.9131969551219,"y":286.06182452082777,"width":13.200000000000001,"height":15.0,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1408444750,"version":1,"versionNonce":313906941,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"k7","originalText":"k7","fontSize":12,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4e4808f8","type":"ellipse","x":185.28586684958105,"y":232.2953098632576,"width":18,"height":18,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1774917740,"version":1,"versionNonce":1279621630,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e7d7aaa4c","type":"text","x":210.66720014315038,"y":253.57893815385376,"width":13.200000000000001,"height":15.0,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1018673751,"version":1,"versionNonce":1411472909,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"k8","originalText":"k8","fontSize":12,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e77feef76","type":"text","x":81.92499999999998,"y":524,"width":436.15000000000003,"height":16.25,"angle":0,"strokeColor":"#1971c2","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":752494410,"version":1,"versionNonce":334819384,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"walk clockwise from a key → the first server you meet owns it","originalText":"walk clockwise from a key → the first server you meet owns it","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e463a7e10","type":"text","x":53.32499999999999,"y":544,"width":493.35,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1177434288,"version":1,"versionNonce":281285696,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"k1 → S1  ·  k2 k3 k4 → S2  ·  k5 k6 → S3  ·  k7 k8 → S1 (wrap around)","originalText":"k1 → S1  ·  k2 k3 k4 → S2  ·  k5 k6 → S3  ·  k7 k8 → S1 (wrap around)","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2bd205a","type":"text","x":484,"y":220,"width":185.9,"height":48.75,"angle":0,"strokeColor":"#0b7285","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":30586465,"version":1,"versionNonce":1716606102,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"add S4 at 330°:\nonly k7, k8 move (S1 → S4)\nk1 – k6 do not move at all","originalText":"add S4 at 330°:\nonly k7, k8 move (S1 → S4)\nk1 – k6 do not move at all","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e7c462116","type":"text","x":484,"y":370,"width":135.85000000000002,"height":48.75,"angle":0,"strokeColor":"#e03131","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1559867823,"version":1,"versionNonce":1395165731,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"remove S2:\nk2 k3 k4 go to S3\nnobody else notices","originalText":"remove S2:\nk2 k3 k4 go to S3\nnobody else notices","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"ed27a27d","type":"text","x":650,"y":78,"width":305.25,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1130824189,"version":1,"versionNonce":1609530891,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"B · Why not  server = hash(key) % N ?","originalText":"B · Why not  server = hash(key) % N ?","fontSize":15,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e77810486","type":"rectangle","x":650,"y":110,"width":320,"height":90,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["mod"],"frameId":null,"roundness":{"type":3},"seed":299038661,"version":1,"versionNonce":931598661,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e7e47405a","type":"text","x":636.75,"y":128.75,"width":346.5,"height":52.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["mod"],"frameId":null,"roundness":null,"seed":1872053693,"version":1,"versionNonce":418341499,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"server = hash(key) % N\nN: 3 → 4  ⇒  ~75% of keys change server\ncache: a storm of misses · DB: mass data move","originalText":"server = hash(key) % N\nN: 3 → 4  ⇒  ~75% of keys change server\ncache: a storm of misses · DB: mass data move","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e69bf748b","type":"rectangle","x":650,"y":230,"width":320,"height":90,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#b2f2bb","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["ring"],"frameId":null,"roundness":{"type":3},"seed":1876700679,"version":1,"versionNonce":453209983,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e3954c6a","type":"text","x":671.4,"y":248.75,"width":277.20000000000005,"height":52.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["ring"],"frameId":null,"roundness":null,"seed":540811142,"version":1,"versionNonce":456941127,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"ring: server = next one clockwise\nN: 3 → 4  ⇒  only ~1/4 of keys move\nand only ONE neighbour gives up keys","originalText":"ring: server = next one clockwise\nN: 3 → 4  ⇒  only ~1/4 of keys move\nand only ONE neighbour gives up keys","fontSize":14,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e257fee69","type":"arrow","x":810,"y":200,"width":0,"height":30,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1076237036,"version":1,"versionNonce":516554407,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[0,30]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e61c04251","type":"text","x":822,"y":206,"width":50.050000000000004,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1259364231,"version":1,"versionNonce":700056706,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"the fix","originalText":"the fix","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e2132dd99","type":"text","x":650,"y":350,"width":214.50000000000003,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1168988664,"version":1,"versionNonce":899822596,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"C · Virtual nodes (vnodes)","originalText":"C · Virtual nodes (vnodes)","fontSize":15,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e6ac6e6db","type":"rectangle","x":650,"y":380,"width":320,"height":110,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#e9ecef","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["vn"],"frameId":null,"roundness":{"type":3},"seed":281478590,"version":1,"versionNonce":130791459,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e747b705f","type":"text","x":664,"y":402.5,"width":343.20000000000005,"height":65.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["vn"],"frameId":null,"roundness":null,"seed":1588970510,"version":1,"versionNonce":759745401,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"each real server = 100–200 points on the ring\nS1-a, S1-b, S1-c … spread all around\n→ even load; a bigger machine gets more points\n→ when S1 dies its keys spread over ALL the rest","originalText":"each real server = 100–200 points on the ring\nS1-a, S1-b, S1-c … spread all around\n→ even load; a bigger machine gets more points\n→ when S1 dies its keys spread over ALL the rest","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e72e7f6fe","type":"text","x":1000,"y":78,"width":173.25,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":983893223,"version":1,"versionNonce":1422653865,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"D · Who uses the ring","originalText":"D · Who uses the ring","fontSize":15,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4aab2c30","type":"rectangle","x":1000,"y":110,"width":330,"height":210,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["users"],"frameId":null,"roundness":{"type":3},"seed":1750300172,"version":1,"versionNonce":1941962533,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e4225381b","type":"text","x":1014,"y":166.25,"width":286.0,"height":97.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["users"],"frameId":null,"roundness":null,"seed":903292334,"version":1,"versionNonce":1776268929,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"DynamoDB · Cassandra · Riak\n   → which node stores this row\nMemcached / Redis client libraries\n   → which cache node holds this key\nLoad balancers (same user → same server)\nCDNs (Akamai) · Discord · Chord DHT","originalText":"DynamoDB · Cassandra · Riak\n   → which node stores this row\nMemcached / Redis client libraries\n   → which cache node holds this key\nLoad balancers (same user → same server)\nCDNs (Akamai) · Discord · Chord DHT","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e7577e26a","type":"rectangle","x":1000,"y":380,"width":130,"height":60,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#a5d8ff","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["api"],"frameId":null,"roundness":{"type":3},"seed":1885853095,"version":1,"versionNonce":1077282907,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e10bcd9bf","type":"text","x":1023.75,"y":400.625,"width":82.5,"height":18.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["api"],"frameId":null,"roundness":null,"seed":1142085420,"version":1,"versionNonce":326066158,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"API server","originalText":"API server","fontSize":15,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4302438d","type":"rectangle","x":1200,"y":380,"width":130,"height":60,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffd8a8","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["rl"],"frameId":null,"roundness":{"type":3},"seed":1096391373,"version":1,"versionNonce":40168391,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e6fb8180c","type":"text","x":1215.5,"y":387.5,"width":99.00000000000001,"height":45.0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["rl"],"frameId":null,"roundness":null,"seed":945161047,"version":1,"versionNonce":1667534282,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"ring lookup\n(sorted array +\nbinary search)","originalText":"ring lookup\n(sorted array +\nbinary search)","fontSize":12,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e1770144f","type":"arrow","x":1130,"y":410,"width":70,"height":0,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":{"type":2},"seed":1306861148,"version":1,"versionNonce":8444937,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"points":[[0,0],[70,0]],"lastCommittedPoint":null,"startBinding":null,"endBinding":null,"startArrowhead":null,"endArrowhead":"arrow","elbowed":false},{"id":"e63553eab","type":"text","x":1132.825,"y":390,"width":64.35000000000001,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":1716205476,"version":1,"versionNonce":321698388,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"hash(key)","originalText":"hash(key)","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e160f7510","type":"text","x":1014.85,"y":452,"width":300.3,"height":16.25,"angle":0,"strokeColor":"#868e96","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":[],"frameId":null,"roundness":null,"seed":303995577,"version":1,"versionNonce":1016818332,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"O(log V) per lookup · V = number of vnodes","originalText":"O(log V) per lookup · V = number of vnodes","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e5cd32218","type":"ellipse","x":227,"y":115,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge4f3eb59c"],"frameId":null,"roundness":null,"seed":258420911,"version":1,"versionNonce":1195022320,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e7e798e6","type":"text","x":236.425,"y":120,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge4f3eb59c"],"frameId":null,"roundness":null,"seed":700041331,"version":1,"versionNonce":1465295449,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"1","originalText":"1","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e43eed75c","type":"ellipse","x":953,"y":93,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge4259402b"],"frameId":null,"roundness":null,"seed":1192802337,"version":1,"versionNonce":1036132969,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e64630a5a","type":"text","x":962.425,"y":98,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge4259402b"],"frameId":null,"roundness":null,"seed":1667499798,"version":1,"versionNonce":227868237,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"2","originalText":"2","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e47b7c8b0","type":"ellipse","x":953,"y":213,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge710d9be6"],"frameId":null,"roundness":null,"seed":122025547,"version":1,"versionNonce":533637501,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e187cb82d","type":"text","x":962.425,"y":218,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge710d9be6"],"frameId":null,"roundness":null,"seed":594674889,"version":1,"versionNonce":90621425,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"3","originalText":"3","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"ec82eac9","type":"ellipse","x":953,"y":363,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge62d973ae"],"frameId":null,"roundness":null,"seed":1090307498,"version":1,"versionNonce":971040407,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e47e6bfa1","type":"text","x":962.425,"y":368,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge62d973ae"],"frameId":null,"roundness":null,"seed":59841250,"version":1,"versionNonce":1632072836,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"4","originalText":"4","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e74cc6878","type":"ellipse","x":1313,"y":93,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge726efcdd"],"frameId":null,"roundness":null,"seed":136083547,"version":1,"versionNonce":951868678,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e29adb522","type":"text","x":1322.425,"y":98,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge726efcdd"],"frameId":null,"roundness":null,"seed":1315393613,"version":1,"versionNonce":2090275229,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"5","originalText":"5","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e4d95eb61","type":"ellipse","x":1313,"y":363,"width":26,"height":26,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffc9c9","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge40b5f704"],"frameId":null,"roundness":null,"seed":1099858400,"version":1,"versionNonce":428215122,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e58ab68d7","type":"text","x":1322.425,"y":368,"width":7.15,"height":16.25,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["badge40b5f704"],"frameId":null,"roundness":null,"seed":595251419,"version":1,"versionNonce":971405186,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"6","originalText":"6","fontSize":13,"fontFamily":5,"textAlign":"center","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e410b42c8","type":"rectangle","x":0,"y":590,"width":215,"height":131.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note1"],"frameId":null,"roundness":{"type":3},"seed":1145221749,"version":1,"versionNonce":1733797003,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e3d304b42","type":"text","x":10,"y":599,"width":200.20000000000002,"height":113.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note1"],"frameId":null,"roundness":null,"seed":1090388816,"version":1,"versionNonce":2021858280,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"① The ring\nHash the server name AND the\nkey with the same function\nonto 0 … 2³²−1, bent into a\ncircle. Nothing is stored on\nthe ring — it is just\narithmetic.","originalText":"① The ring\nHash the server name AND the\nkey with the same function\nonto 0 … 2³²−1, bent into a\ncircle. Nothing is stored on\nthe ring — it is just\narithmetic.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e1fb32f70","type":"rectangle","x":225,"y":590,"width":215,"height":131.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note2"],"frameId":null,"roundness":{"type":3},"seed":1501558974,"version":1,"versionNonce":1123584174,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e7032508b","type":"text","x":235,"y":599,"width":207.35000000000002,"height":97.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note2"],"frameId":null,"roundness":null,"seed":1881145519,"version":1,"versionNonce":2023317399,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"② Modulo breaks\nhash % N depends on N. Change\nN and almost every key maps\nsomewhere else → every cache\nmisses at once, or terabytes\nmove between DB shards.","originalText":"② Modulo breaks\nhash % N depends on N. Change\nN and almost every key maps\nsomewhere else → every cache\nmisses at once, or terabytes\nmove between DB shards.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e76c27490","type":"rectangle","x":450,"y":590,"width":215,"height":131.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note3"],"frameId":null,"roundness":{"type":3},"seed":557470198,"version":1,"versionNonce":1981664003,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e479e25f2","type":"text","x":460,"y":599,"width":214.50000000000003,"height":113.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note3"],"frameId":null,"roundness":null,"seed":1917176626,"version":1,"versionNonce":2025650538,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"③ Only neighbours move\nA new server takes keys only\nfrom the server just clockwise\nof it. Removing one hands its\nkeys to its clockwise\nneighbour. Everyone else:\nuntouched.","originalText":"③ Only neighbours move\nA new server takes keys only\nfrom the server just clockwise\nof it. Removing one hands its\nkeys to its clockwise\nneighbour. Everyone else:\nuntouched.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e19ee6bc0","type":"rectangle","x":675,"y":590,"width":215,"height":131.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note4"],"frameId":null,"roundness":{"type":3},"seed":1803885801,"version":1,"versionNonce":961059551,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e118d9f0b","type":"text","x":685,"y":599,"width":207.35000000000002,"height":97.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note4"],"frameId":null,"roundness":null,"seed":894721265,"version":1,"versionNonce":261181161,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"④ Virtual nodes\n3 real servers = 3 points →\nuneven gaps, uneven load. 150\npoints each → statistically\neven. A bigger machine simply\ntakes more points.","originalText":"④ Virtual nodes\n3 real servers = 3 points →\nuneven gaps, uneven load. 150\npoints each → statistically\neven. A bigger machine simply\ntakes more points.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e3238fef3","type":"rectangle","x":900,"y":590,"width":215,"height":131.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note5"],"frameId":null,"roundness":{"type":3},"seed":949441370,"version":1,"versionNonce":678561451,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e94930c3","type":"text","x":910,"y":599,"width":207.35000000000002,"height":97.5,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note5"],"frameId":null,"roundness":null,"seed":1441295358,"version":1,"versionNonce":516767805,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"⑤ Replication\nStore each key on the next R\ndistinct servers clockwise (R\n= 3). Cassandra and Dynamo do\nexactly this. Skip vnodes of\nthe same machine.","originalText":"⑤ Replication\nStore each key on the next R\ndistinct servers clockwise (R\n= 3). Cassandra and Dynamo do\nexactly this. Skip vnodes of\nthe same machine.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true},{"id":"e36d3cd44","type":"rectangle","x":1125,"y":590,"width":215,"height":131.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"#ffec99","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note6"],"frameId":null,"roundness":{"type":3},"seed":157025655,"version":1,"versionNonce":456747864,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false},{"id":"e55b14367","type":"text","x":1135,"y":599,"width":193.05,"height":113.75,"angle":0,"strokeColor":"#1e1e1e","backgroundColor":"transparent","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":1,"opacity":100,"groupIds":["note6"],"frameId":null,"roundness":null,"seed":650215255,"version":1,"versionNonce":1683489784,"isDeleted":false,"boundElements":[],"updated":1792316706386,"link":null,"locked":false,"text":"⑥ Hot keys\nThe ring balances KEYS, not\nTRAFFIC. One celebrity key\nstill lands on one server.\nFix: cache it, or split it\n(key#1, key#2 …) across\nservers.","originalText":"⑥ Hot keys\nThe ring balances KEYS, not\nTRAFFIC. One celebrity key\nstill lands on one server.\nFix: cache it, or split it\n(key#1, key#2 …) across\nservers.","fontSize":13,"fontFamily":5,"textAlign":"left","verticalAlign":"top","containerId":null,"lineHeight":1.25,"autoResize":true}]}</script>
+  </section>
+
+  <!-- 1 -->
+  <section id="ownership" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">1</span>
+      <div>
+        <h2>Ownership, and routing by hash</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 0:00</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson starts by clearing up misconceptions. Consistent hashing is not a magical solution and it is not a service. It is an algorithm that answers one question: <strong>who owns this?</strong> Which node holds this key, which server handles this request, which machine manages this partition. <span class="term">Ownership</span>, and nothing else.</p>
+      <h3>Hash-based routing <span class="ts">▶ 1:46</span></h3>
+      <p>Take a load balancer with three servers behind it. A request arrives; the load balancer must pick a server. One common way is <span class="term">hash-based routing</span>: take something from the request (the user ID, the IP address, a request ID), hash it, and take the result <code>mod 3</code>. You get 0, 1 or 2. Send the request to that server.</p>
+      <p>The hash function can be anything: SHA-256, SHA-1, MD5. It turns the user ID into a big number; the mod turns the big number into a server index.</p>
+    </div>
+
+    <figure>
+      <p class="cap">Hash-based routing in a load balancer</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 210" role="img" aria-label="A user request reaches the load balancer, which hashes the user id, takes it modulo three and forwards the request to one of three API servers.">
+          <path class="wire" d="M116 100H190" marker-end="url(#ah)"/>
+          <path class="wire accent" d="M420 100C470 100 480 46 540 46" marker-end="url(#ah-accent)"/>
+          <path class="wire dash" d="M420 100H540" marker-end="url(#ah)"/>
+          <path class="wire dash" d="M420 100C470 100 480 154 540 154" marker-end="url(#ah)"/>
+          <text x="153" y="90" text-anchor="middle" class="t-mono t-muted">user 42</text>
+          <text x="480" y="60" text-anchor="middle" class="t-mono t-accent">→ 0</text>
+
+          <rect class="node" x="16" y="77" width="100" height="46" rx="10"/>
+          <text x="66" y="105" text-anchor="middle">User</text>
+          <rect class="node main" x="190" y="62" width="230" height="76" rx="10"/>
+          <text x="305" y="88" text-anchor="middle" class="t-b">Load balancer</text>
+          <text x="305" y="110" text-anchor="middle" class="t-mono">hash(user_id) % 3</text>
+          <text x="305" y="128" text-anchor="middle" class="t-muted">a function in the request handler</text>
+          <rect class="node copy" x="540" y="24" width="140" height="44" rx="10"/><text x="610" y="51" text-anchor="middle">API server 0</text>
+          <rect class="node" x="540" y="78" width="140" height="44" rx="10"/><text x="610" y="105" text-anchor="middle">API server 1</text>
+          <rect class="node" x="540" y="132" width="140" height="44" rx="10"/><text x="610" y="159" text-anchor="middle">API server 2</text>
+          <text x="380" y="196" text-anchor="middle" class="t-muted">same user id → same hash → same server, every time</text>
+        </svg>
+      </div>
+    </figure>
+
+    <div class="callout key">
+      <span class="cap">It is a function, not a service <span class="ts">▶ 3:02</span></span>
+      <p>The routing logic lives inside the load balancer’s request handler. It does not call out to another microservice. “We just don’t add random microservices for the sake of it. This is how real systems are built.” Keep that sentence; the lesson repeats it for consistent hashing too.</p>
+    </div>
+  </section>
+
+  <!-- 2 -->
+  <section id="stateless" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">2</span>
+      <div>
+        <h2>Stateless servers: changing N costs nothing</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 4:01</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>Now say traffic has dropped and you want to remove one of the three servers. The load balancer changes <code>mod 3</code> to <code>mod 2</code>. The next request for user 42 may land on a different server than before. Is that a problem?</p>
+      <p>No. Because the API servers are <span class="term">stateless</span>. None of them keeps anything about user 42 between requests. Every server is equally capable of handling any request. So it does not matter which one a request goes to, and removing a server causes no hiccup at all.</p>
+      <p>This is why hash-based routing (and round robin) is so common for the load-balancer-plus-API-servers layer. Statelessness makes “which server” an unimportant question.</p>
+    </div>
+  </section>
+
+  <!-- 3 -->
+  <section id="stateful" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">3</span>
+      <div>
+        <h2>Stateful nodes: the same trick breaks</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 6:25</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>Replace the API servers with <strong>storage nodes</strong>: a distributed key-value store. “Store this key with this value”, “give me the value for this key”. The data is split across the nodes; there is no single database that has everything. In front of them sits a <span class="term">proxy</span> that decides, for each key, which node to talk to.</p>
+      <p>The proxy does the same thing as before: <code>hash(key) % 3</code>. The key is stored on the node the hash points to. Because the hash of a key never changes, every later request for that key goes to the same node. <strong>That node owns the key.</strong></p>
+    </div>
+
+    <figure>
+      <p class="cap">Three storage nodes, six keys, ownership by hash mod 3</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 214" role="img" aria-label="A proxy hashes each key modulo three. Node 0 owns k2 and k6, node 1 owns k3 and k5, node 2 owns k1 and k4. A request for k3 always goes to node 1, where the data is.">
+          <path class="wire" d="M116 110H190" marker-end="url(#ah)"/>
+          <path class="wire dash" d="M400 110C450 110 460 52 520 52" marker-end="url(#ah)"/>
+          <path class="wire accent" d="M400 110H520" marker-end="url(#ah-accent)"/>
+          <path class="wire dash" d="M400 110C450 110 460 168 520 168" marker-end="url(#ah)"/>
+          <text x="153" y="100" text-anchor="middle" class="t-mono t-muted">get k3</text>
+          <text x="460" y="100" text-anchor="middle" class="t-mono t-accent">→ 1</text>
+
+          <rect class="node" x="16" y="87" width="100" height="46" rx="10"/>
+          <text x="66" y="115" text-anchor="middle">Client</text>
+          <rect class="node main" x="190" y="76" width="210" height="68" rx="10"/>
+          <text x="295" y="102" text-anchor="middle" class="t-b">Proxy</text>
+          <text x="295" y="124" text-anchor="middle" class="t-mono">hash(key) % 3</text>
+
+          <rect class="node" x="520" y="30" width="220" height="44" rx="10"/>
+          <text x="560" y="57" text-anchor="start" class="t-b">node 0</text>
+          <text x="700" y="57" text-anchor="end" class="t-mono">k2 · k6</text>
+          <rect class="node copy" x="520" y="88" width="220" height="44" rx="10"/>
+          <text x="560" y="115" text-anchor="start" class="t-b">node 1</text>
+          <text x="700" y="115" text-anchor="end" class="t-mono">k3 · k5</text>
+          <rect class="node" x="520" y="146" width="220" height="44" rx="10"/>
+          <text x="560" y="173" text-anchor="start" class="t-b">node 2</text>
+          <text x="700" y="173" text-anchor="end" class="t-mono">k1 · k4</text>
+          <text x="380" y="204" text-anchor="middle" class="t-muted">send “get k3” to node 0 and you get a miss: the data is not there</text>
+        </svg>
+      </div>
+      <figcaption>Statefulness is the point: all requests for k3 must reach node 1, because only node 1 has k3.</figcaption>
+    </figure>
+
+    <div class="prose">
+      <h3>Now remove a node <span class="ts">▶ 9:15</span></h3>
+      <p>Just like before, remove node 2. The proxy switches to <code>mod 2</code>. But now you cannot simply send “get k3” wherever the new function says, because the data for k3 is only on the node that owned it under the <em>old</em> function. The output of the hash function did not change; the <code>mod</code> did, and with it the ownership of almost everything.</p>
+      <p>So before node 2 can go, you must go through <strong>every key</strong>, recompute <code>hash(key) % 2</code>, and move each key that now belongs somewhere else. The lesson’s six keys:</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>Key</th><th>Owner with mod 3</th><th>Owner with mod 2</th><th>Must move?</th></tr></thead>
+        <tbody>
+          <tr><th>k1</th><td>node 2</td><td>node 0</td><td class="bad">yes</td></tr>
+          <tr><th>k2</th><td>node 0</td><td>node 1</td><td class="bad">yes</td></tr>
+          <tr><th>k3</th><td>node 1</td><td>node 1</td><td class="good">no</td></tr>
+          <tr><th>k4</th><td>node 2</td><td>node 0</td><td class="bad">yes</td></tr>
+          <tr><th>k5</th><td>node 1</td><td>node 1</td><td class="good">no</td></tr>
+          <tr><th>k6</th><td>node 0</td><td>node 0</td><td class="good">no</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>Three of six keys moved: 50%. Notice that keys like k2 moved <em>between two nodes that are both staying</em>. With millions or billions of keys this is a huge data transfer, and you cannot serve the new layout until it is finished. The lesson calls this <span class="term">repartitioning</span>, and it is the limitation of hash-based routing: you handed your power to a hash function, and when the function changes the mapping changes with it.</p>
+    </div>
+    <div class="callout key">
+      <span class="cap">The question that leads to consistent hashing <span class="ts">▶ 12:32</span></span>
+      <p>Can we minimise data movement when a node is added or removed? Twelve minutes of the video exist to make you feel this problem before seeing the answer.</p>
+    </div>
+  </section>
+
+  <!-- 4 -->
+  <section id="ring" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">4</span>
+      <div>
+        <h2>Consistent hashing: the ring</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 12:45</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>Like hash-based routing, consistent hashing answers “who owns this key”. What it does <em>not</em> do: it will not transfer data for you, and it is not a service. It is a function. You give it a key and the current list of nodes, and it tells you the owner. The moving of data is still your job.</p>
+      <h3>Build the ring <span class="ts">▶ 13:47</span></h3>
+      <p>Take the same hash function as before, but <strong>without the mod</strong>. A hash function like SHA-1 gives a number between 0 and 2¹²⁸−1 (the lesson says 128 bits; the exact width does not matter). Imagine that whole range laid out and bent into a circle, so that the maximum value is followed by 0 again. That circle is the <span class="term">hash ring</span>. The lesson uses a toy range of 0 to 15 so you can see it.</p>
+      <p>Now <strong>every storage node takes a slot on the ring</strong>: hash something that identifies the node (its IP address, its name) and that number is its position. In the lesson, node 0 lands on slot 3, node 2 on slot 8, node 1 on slot 12.</p>
+      <h3>Find the owner <span class="ts">▶ 17:24</span></h3>
+      <p>To find who owns key k1, hash k1 with the same function. Say it gives 0. Place it on the ring at 0, then walk <strong>clockwise</strong> until you hit a node. The first node you meet owns the key. From 0 the first node is at 3: node 0 owns k1. Key k2 hashes to 10; walking clockwise the first node is at 12: node 1 owns k2.</p>
+    </div>
+
+    <figure>
+      <p class="cap">The ring (toy range 0–15) and what it really is: a sorted array</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 270" role="img" aria-label="A ring with sixteen slots. Node 0 sits at slot 3, node 2 at slot 8, node 1 at slot 12. Key k1 at slot 0 walks clockwise to node 0; key k2 at slot 10 walks clockwise to node 1. On the right, the same ring as a sorted array of three positions searched with binary search.">
+          <circle class="ring" cx="180" cy="135" r="100"/>
+          <path class="tick" d="M180 35V29 M218.3 42.6L220.6 40 M250.7 64.3L254.9 60.1 M272.4 96.7L277.9 94.4 M280 135H286 M272.4 173.3L277.9 175.6 M250.7 205.7L254.9 209.9 M218.3 227.4L220.6 230 M180 235V241 M141.7 227.4L139.4 230 M109.3 205.7L105.1 209.9 M87.6 173.3L82.1 175.6 M80 135H74 M87.6 96.7L82.1 94.4 M109.3 64.3L105.1 60.1 M141.7 42.6L139.4 40"/>
+          <text x="180" y="20" text-anchor="middle" class="t-mono t-muted">0 / 16</text>
+          <text x="298" y="139" text-anchor="start" class="t-mono t-muted">4</text>
+          <text x="180" y="258" text-anchor="middle" class="t-mono t-muted">8</text>
+          <text x="58" y="139" text-anchor="end" class="t-mono t-muted">12</text>
+
+          <path class="wire teal" d="M194 39A100 100 0 0 1 258 82" marker-end="url(#ah-teal)"/>
+          <path class="wire teal" d="M100 199A100 100 0 0 1 82 153" marker-end="url(#ah-teal)"/>
+
+          <circle class="node main" cx="272" cy="97" r="16"/><text x="272" y="101" text-anchor="middle" class="t-num">0</text>
+          <text x="294" y="86" text-anchor="start" class="t-sm t-accent">node 0 @ 3</text>
+          <circle class="node" cx="180" cy="235" r="16"/><text x="180" y="239" text-anchor="middle" class="t-num">2</text>
+          <text x="204" y="248" text-anchor="start" class="t-sm t-muted">node 2 @ 8</text>
+          <circle class="node copy" cx="80" cy="135" r="16"/><text x="80" y="139" text-anchor="middle" class="t-num">1</text>
+          <text x="84" y="110" text-anchor="middle" class="t-sm t-teal">node 1 @ 12</text>
+
+          <circle class="key" cx="180" cy="35" r="8"/><text x="200" y="56" text-anchor="start" class="t-mono t-sm">k1 → 0</text>
+          <circle class="key" cx="109" cy="206" r="8"/><text x="120" y="222" text-anchor="start" class="t-mono t-sm">k2 → 10</text>
+
+          <text x="500" y="40" text-anchor="start" class="t-b">Not a linked list. An array, kept sorted:</text>
+          <rect class="slot" x="520" y="56" width="60" height="40"/><text x="550" y="81" text-anchor="middle" class="t-num">3</text>
+          <rect class="slot" x="580" y="56" width="60" height="40"/><text x="610" y="81" text-anchor="middle" class="t-num">8</text>
+          <rect class="slot" x="640" y="56" width="60" height="40"/><text x="670" y="81" text-anchor="middle" class="t-num">12</text>
+          <text x="550" y="114" text-anchor="middle" class="t-sm t-muted">node 0</text>
+          <text x="610" y="114" text-anchor="middle" class="t-sm t-muted">node 2</text>
+          <text x="670" y="114" text-anchor="middle" class="t-sm t-muted">node 1</text>
+          <text x="500" y="150" text-anchor="start" class="t-mono t-sm">owner = first entry ≥ hash(key)</text>
+          <text x="500" y="168" text-anchor="start" class="t-mono t-sm">none ≥ it? wrap to the first entry</text>
+          <text x="500" y="200" text-anchor="start" class="t-sm">hash(k1) = 0  → first ≥ 0 is 3  → node 0</text>
+          <text x="500" y="220" text-anchor="start" class="t-sm">hash(k2) = 10 → first ≥ 10 is 12 → node 1</text>
+          <text x="500" y="240" text-anchor="start" class="t-sm">hash(k) = 14  → nothing ≥ 14 → wrap → node 0</text>
+        </svg>
+      </div>
+      <figcaption>“It looks like a ring” is only a picture. In code it is an array of the node positions in order, and finding the owner is one binary search. The array lives in the proxy, next to the hash function.</figcaption>
+    </figure>
+  </section>
+
+  <!-- 5 -->
+  <section id="scale" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">5</span>
+      <div>
+        <h2>Scaling up and down with minimal movement</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 18:37</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <h3>Add a node</h3>
+      <p>The three-node cluster is not enough, so you add node 3. Hash its address; say it lands on slot 1. Which keys are affected? Only the keys that hash to the stretch of ring between the previous node (node 1 at 12) and the new node at 1, that is slots 13, 14, 15, 0 and 1. Those keys used to walk clockwise to node 0; now they stop at node 3 first.</p>
+      <p>Every other key is untouched. Keys between 1 and 3 still go to node 0. Keys between 3 and 8 still go to node 2. Keys between 8 and 12 still go to node 1. <strong>Only one stretch of the ring changed owner, and you know exactly which one.</strong></p>
+    </div>
+
+    <div class="grid-2">
+      <figure style="margin:0">
+        <p class="cap">Before · node 0 owns everything from 12 round to 3</p>
+        <svg class="dia" viewBox="0 0 340 236" role="img" aria-label="Ring with nodes at slots 3, 8 and 12. The stretch from slot 12 clockwise to slot 3 belongs to node 0.">
+          <path class="arc teal" d="M70 118A80 80 0 0 1 223.9 87.4"/>
+          <circle class="ring" cx="150" cy="118" r="80"/>
+          <circle class="node main" cx="223.9" cy="87.4" r="14"/><text x="223.9" y="91.4" text-anchor="middle" class="t-num">0</text>
+          <circle class="node" cx="150" cy="198" r="14"/><text x="150" y="202" text-anchor="middle" class="t-num">2</text>
+          <circle class="node copy" cx="70" cy="118" r="14"/><text x="70" y="122" text-anchor="middle" class="t-num">1</text>
+          <text x="150" y="26" text-anchor="middle" class="t-mono t-muted">0</text>
+          <text x="150" y="128" text-anchor="middle" class="t-teal">node 0 owns 13 … 3</text>
+          <text x="150" y="230" text-anchor="middle" class="t-muted">slots 13, 14, 15, 0, 1, 2, 3 → node 0</text>
+        </svg>
+      </figure>
+      <figure style="margin:0">
+        <p class="cap">After · node 3 at slot 1 takes part of that stretch</p>
+        <svg class="dia" viewBox="0 0 340 236" role="img" aria-label="The same ring with a new node 3 at slot 1. The stretch from slot 12 to slot 1 now belongs to node 3; node 0 keeps only slots 2 and 3. Nodes 1 and 2 are untouched.">
+          <path class="arc amber" d="M70 118A80 80 0 0 1 180.6 44.1"/>
+          <path class="arc teal" d="M180.6 44.1A80 80 0 0 1 223.9 87.4"/>
+          <circle class="ring" cx="150" cy="118" r="80"/>
+          <circle class="node main" cx="223.9" cy="87.4" r="14"/><text x="223.9" y="91.4" text-anchor="middle" class="t-num">0</text>
+          <circle class="node" cx="150" cy="198" r="14"/><text x="150" y="202" text-anchor="middle" class="t-num">2</text>
+          <circle class="node copy" cx="70" cy="118" r="14"/><text x="70" y="122" text-anchor="middle" class="t-num">1</text>
+          <circle class="node dead" cx="180.6" cy="44.1" r="14" style="stroke:var(--amber);fill:color-mix(in srgb,var(--amber) 18%,var(--surface));stroke-dasharray:none"/><text x="180.6" y="48.1" text-anchor="middle" class="t-num">3</text>
+          <text x="150" y="26" text-anchor="middle" class="t-mono t-muted">0</text>
+          <text x="150" y="112" text-anchor="middle" class="t-accent">node 3 takes 13 … 1</text>
+          <text x="150" y="132" text-anchor="middle" class="t-teal">node 0 keeps 2 … 3</text>
+          <text x="150" y="230" text-anchor="middle" class="t-muted">nodes 1 and 2: nothing changes</text>
+        </svg>
+      </figure>
+    </div>
+
+    <div class="prose">
+      <h3>How you actually do it <span class="ts">▶ 20:27</span></h3>
+      <p>Do you have to scan all the keys to find the affected ones? No. Every affected key currently lives on <strong>one node</strong>: the one just clockwise of the new slot (node 0). So:</p>
+    </div>
+    <ol class="step-list">
+      <li><b>Snapshot node 0</b><p>Take a copy of the node that is about to give up keys. It is the only node involved.</p></li>
+      <li><b>Create node 3 from the snapshot</b><p>Start the new node with that copy of the data. It now has more than it needs.</p></li>
+      <li><b>Add node 3 to the ring and start serving</b><p>Insert its position into the sorted array in the proxy. From now on keys in 13 … 1 are routed to node 3, which has them.</p></li>
+      <li><b>Delete the extras</b><p>On node 3, delete the keys that do not hash into 13 … 1. On node 0, delete the keys that do. Both deletes can run in the background.</p></li>
+    </ol>
+    <div class="prose">
+      <p>You never touched node 1 or node 2. Snapshot, spin up, add, clean up. “That is the beauty of this algorithm: simple to understand and simple to operate.”</p>
+
+      <h3>Remove a node <span class="ts">▶ 22:10</span></h3>
+      <p>Scaling down is the mirror image. Say you remove node 0. Its keys walk clockwise and now stop at the next node, node 2. So: dump everything from node 0, load it into node 2, remove node 0 from the array. Node 2 takes a little more traffic, which is fine, since you are scaling down because you were over-provisioned. Again, nobody else is involved, and you do not even need to look at individual keys: you copy the whole node.</p>
+    </div>
+    <div class="callout key">
+      <span class="cap">The property in one line</span>
+      <p>Adding or removing a node changes the owner of only the keys on one stretch of the ring, and those keys all live on one neighbour. That is “consistent”: the mapping stays mostly the same when N changes.</p>
+    </div>
+  </section>
+
+  <!-- 6 -->
+  <section id="function" class="from-video">
+    <div class="sec-head">
+      <span class="sec-num">6</span>
+      <div>
+        <h2>A function, not a service: implement it</h2>
+        <div class="sec-meta"><span class="badge">From the video</span><span class="ts">▶ 23:37</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson ends with homework and a point of view. The homework: watch again until the idea is solid, then read the author’s 2020 blog post (<code>arpitbhayani.me</code>, “consistent hashing”), which has a Python implementation, and <strong>implement it in your own language</strong>. It needs one sorted array and one binary search. The lesson says two arrays is already overkill.</p>
+      <p>The point of view: drawing rings is visually appealing and makes the idea easy, but “the real fun is you will have to implement it someday.” System design is not theory. At every stage, think about how the thing would actually be built. Consistent hashing is the perfect example: it sounds like infrastructure, and it is twenty lines of code inside the proxy.</p>
+    </div>
+  </section>
+
+  <!-- 7 -->
+  <section id="deeper" class="extra">
+    <div class="sec-head">
+      <span class="sec-num">7</span>
+      <div>
+        <h2>Going deeper</h2>
+        <div class="sec-meta"><span class="badge">Extra depth · not in the video</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson gives you the ring with one point per node. Real systems add a few things on top, and these are what the follow-up questions are about.</p>
+
+      <h3>7.1 · One point per node gives an uneven ring</h3>
+      <p>Hash three node names and you get three random positions. Random positions make random gaps: one node may own half the ring while another owns a tenth. The lab below measures it: with 10,000 keys and 3 nodes, one node got <strong>53%</strong> of the keys and another <strong>19%</strong>. Add a node and it only relieves its one neighbour, so a hot node stays hot unless the new node happens to land just before it.</p>
+      <p>The fix is <span class="term">virtual nodes</span> (vnodes). Instead of one position per physical node, give each node 100 to 200 positions, by hashing <code>node-1#0</code>, <code>node-1#1</code>, and so on. The ring is now cut into hundreds of small stretches, spread around, and each physical node owns a sample of them. The large-number effect evens things out:</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>Points per node</th><th>Keys on S1 · S2 · S3 (of 10,000)</th><th>Keys moved when S4 is added</th><th>Keys moved when S2 is removed</th></tr></thead>
+        <tbody>
+          <tr><th>1</th><td>2,781 · <span class="bad">5,310</span> · 1,909</td><td>846 (8%, too few: S4 landed in a small gap)</td><td><span class="bad">5,310 (53%)</span>: all of S2’s keys to one neighbour</td></tr>
+          <tr><th>150</th><td>3,792 · 3,045 · 3,163</td><td>2,588 (26%, close to the ideal ¼)</td><td>2,357 (24%), spread over S1, S3 and S4</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>Virtual nodes buy three things: even load; when a node dies its keys spread over <em>all</em> the others instead of landing on one neighbour; and <strong>weighting</strong>, since a machine with twice the capacity can simply get twice the points. Cassandra calls them tokens; it started with 256 per node and moved to 16 with a smarter allocation.</p>
+
+      <h3>7.2 · How much moves, in numbers</h3>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>Change</th><th>hash(key) % N</th><th>Consistent hashing</th></tr></thead>
+        <tbody>
+          <tr><th>3 → 4 nodes</th><td>~75% of keys move</td><td>~25% move (1/4), all from one node</td></tr>
+          <tr><th>10 → 11 nodes</th><td>~91% move</td><td>~9% move (1/11)</td></tr>
+          <tr><th>100 → 101 nodes</th><td>~99% move</td><td>~1% move (1/101)</td></tr>
+          <tr><th>Remove 1 of N</th><td>almost everything</td><td>exactly that node’s keys: 1/N</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>1/(N+1) is the theoretical minimum: the new node must take its fair share from somewhere. Consistent hashing moves nothing beyond that minimum. Modulo moves nearly everything, and most of it between nodes that are not even changing.</p>
+
+      <h3>7.3 · Replication on the ring</h3>
+      <p>The lesson stores each key once. Real stores keep R copies (usually 3) so a dead node loses no data (lesson 19). The ring gives a natural rule: a key is stored on the <strong>first R distinct physical nodes</strong> you meet walking clockwise. Amazon’s Dynamo paper calls this list the <em>preference list</em>; Cassandra, Riak and ScyllaDB work the same way. “Distinct physical” matters once you have virtual nodes: two consecutive points may belong to the same machine, and a copy on the same machine is not a copy.</p>
+    </div>
+    <figure>
+      <p class="cap">R = 3: a key’s owner, plus the next two distinct nodes clockwise</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 236" role="img" aria-label="A ring with four nodes. A key at the top is stored on the first three distinct nodes clockwise from it: nodes A, B and C. Node D does not hold it. If node A dies, B still serves the key.">
+          <circle class="ring" cx="170" cy="118" r="80"/>
+          <path class="wire teal" d="M182 40A80 80 0 0 1 215 55" marker-end="url(#ah-teal)"/>
+          <circle class="key" cx="170" cy="38" r="8"/><text x="150" y="30" text-anchor="end" class="t-mono t-sm">key</text>
+          <circle class="node copy" cx="226.6" cy="61.4" r="14"/><text x="226.6" y="65.4" text-anchor="middle" class="t-num">A</text>
+          <circle class="node copy" cx="243.9" cy="148.6" r="14"/><text x="243.9" y="152.6" text-anchor="middle" class="t-num">B</text>
+          <circle class="node copy" cx="139.4" cy="191.9" r="14"/><text x="139.4" y="195.9" text-anchor="middle" class="t-num">C</text>
+          <circle class="node" cx="100.1" cy="87.4" r="14"/><text x="100.1" y="91.4" text-anchor="middle" class="t-num">D</text>
+          <text x="248" y="48" text-anchor="start" class="t-sm t-teal">owner · copy 1</text>
+          <text x="264" y="152" text-anchor="start" class="t-sm t-teal">copy 2</text>
+          <text x="139" y="222" text-anchor="middle" class="t-sm t-teal">copy 3</text>
+          <text x="80" y="76" text-anchor="end" class="t-sm t-muted">not this key</text>
+
+          <text x="420" y="50" text-anchor="start" class="t-b">Walk clockwise, collect 3 distinct machines</text>
+          <text x="420" y="78" text-anchor="start" class="t-sm">preference list for key = [A, B, C]</text>
+          <text x="420" y="106" text-anchor="start" class="t-sm">write → send to A, B, C; ack when a quorum (2) confirm</text>
+          <text x="420" y="130" text-anchor="start" class="t-sm">read  → ask A (or any of the three)</text>
+          <text x="420" y="166" text-anchor="start" class="t-sm t-red">A dies → B and C still have the key; no data lost</text>
+          <text x="420" y="190" text-anchor="start" class="t-sm t-muted">with vnodes: skip points that belong to a machine already in the list</text>
+        </svg>
+      </div>
+    </figure>
+
+    <div class="prose">
+      <h3>7.4 · Hot keys: the ring balances keys, not traffic</h3>
+      <p>Consistent hashing spreads <em>keys</em> evenly. It knows nothing about how often each key is read. One celebrity’s profile, one viral post, one tenant’s huge table all hash to a single point, so one node takes the whole load. This is the <span class="term">hot key</span> (or hot partition) problem, and no hashing scheme fixes it by itself.</p>
+      <ul>
+        <li><strong>Cache in front</strong>: a hot key is by definition read a lot, so a cache absorbs it (lesson 19’s picture, cache box).</li>
+        <li><strong>Split the key</strong>: write <code>post:99#1</code> … <code>post:99#8</code> to eight places; read from one at random (for counters, add them up).</li>
+        <li><strong>Bounded loads</strong>: a variant (Google, 2017) that caps each node at, say, 125% of average and spills extra keys to the next node clockwise. Vimeo uses it for video routing.</li>
+      </ul>
+
+      <h3>7.5 · Who holds the ring, and how it stays in sync</h3>
+      <p>The sorted array lives in whoever routes: the proxy, or a client library inside every API server (Memcached and Cassandra clients work this way; there is no proxy at all). That raises a question the lesson skips: all of those copies must agree on the <strong>membership list</strong>, or two clients send the same key to different nodes.</p>
+      <ul>
+        <li><strong>Gossip</strong>: nodes tell each other who is alive; clients ask any node for the current ring. Cassandra and Dynamo do this.</li>
+        <li><strong>A coordination service</strong>: the member list lives in ZooKeeper or etcd and clients watch it for changes. This is lesson 20’s box doing another job.</li>
+        <li><strong>Version the ring</strong>: a request carries the ring version it used; a node that receives a key it no longer owns answers “moved, here is the new owner” instead of serving stale data.</li>
+      </ul>
+
+      <h3>7.6 · The alternatives you should be able to name</h3>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>Approach</th><th>How it works</th><th>When it is the better pick</th></tr></thead>
+        <tbody>
+          <tr><th>Fixed hash slots (Redis Cluster)</th><td>Always <code>hash % 16384</code>, then a small table mapping each slot to a node. Moving a node means editing the table, not rehashing keys.</td><td>Same benefit as the ring, simpler to reason about, and slots can be moved one at a time while serving. The most common “real” answer today.</td></tr>
+          <tr><th>Rendezvous (HRW) hashing</th><td>For a key, compute <code>hash(key, node)</code> for every node and pick the highest. No ring, no array, perfectly even.</td><td>Few nodes (tens), and you want no data structure to keep in sync. Removing a node moves only its keys.</td></tr>
+          <tr><th>Jump consistent hash</th><td>A tiny arithmetic function from (key, N) to a bucket in 0 … N−1 with minimal movement. No memory at all.</td><td>Buckets are numbered and only ever added or removed at the end.</td></tr>
+          <tr><th>Range partitioning</th><td>Split keys by sorted ranges (A–F, G–M, …) and keep a directory of which node has which range. HBase, Bigtable, Spanner, MongoDB ranged sharding.</td><td>You need range scans (“all orders from March”). Hashing destroys order; ranges keep it. The price: hot ranges and a directory service.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="prose">
+      <h3>7.7 · Where you have already met it</h3>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th>System</th><th>What the ring decides</th></tr></thead>
+        <tbody>
+          <tr><th>Dynamo, Cassandra, Riak, ScyllaDB</th><td>Which nodes store each row, with virtual nodes (tokens) and the next-R-clockwise replication above. The 2007 Dynamo paper is where most engineers first met the idea.</td></tr>
+          <tr><th>Memcached client libraries (ketama)</th><td>Which cache server holds a key. Adding a cache server used to empty every cache (modulo); the ring made it cheap. Nginx and Envoy’s “consistent hash” load balancing is the same library idea.</td></tr>
+          <tr><th>Akamai’s CDN</th><td>Which edge cache serves a URL. Consistent hashing was invented for this, in a 1997 paper by Karger and others, before it was used for databases.</td></tr>
+          <tr><th>Discord</th><td>Which server process holds a guild’s live session, so all messages for one community land on one machine.</td></tr>
+          <tr><th>Chord and other DHTs</th><td>Peer-to-peer lookup: every node is a point on a ring and holds a few shortcuts to find any key in log N hops.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="prose">
+      <h3>7.8 · Limits worth saying out loud</h3>
+      <ul>
+        <li><strong>It moves no data.</strong> It tells you what must move. The copy, the cut-over and the clean-up are your system’s job, and they take bandwidth and time while serving traffic.</li>
+        <li><strong>The snapshot trick needs a store that can snapshot.</strong> And during the copy, writes to the moving stretch must be sent to both nodes or replayed afterwards.</li>
+        <li><strong>No range queries.</strong> Hashing scatters neighbouring keys across the ring on purpose. If you need “all keys between X and Y”, use range partitioning.</li>
+        <li><strong>Even keys, not even load.</strong> Virtual nodes fix the gaps; they do not fix a hot key.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 8 -->
+  <section id="lab" class="lab">
+    <div class="sec-head">
+      <span class="sec-num">8</span>
+      <div>
+        <h2>Hands-on lab</h2>
+        <div class="sec-meta"><span class="badge">Exercise from the video</span><span class="ts">▶ 23:37 · code added here</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The lesson’s exercise is to implement consistent hashing yourself, with one sorted array and a binary search. Below is one version in Python. It also measures the three claims from the notes: modulo moves most keys, the plain ring is uneven, and virtual nodes fix it.</p>
+    </div>
+
+    <ol class="step-list">
+      <li>
+        <b>Save this as <code>ring.py</code></b>
+        <p>The whole algorithm is the <code>Ring</code> class: a sorted list of <code>(position, node)</code> and one <code>bisect</code> call. The rest is measurement.</p>
+<pre><code>import bisect, hashlib
+from collections import Counter
+
+def h(s):
+    <span class="c"># any hash works; we take 32 bits so the ring is 0 .. 2^32-1</span>
+    return int.from_bytes(hashlib.md5(s.encode()).digest()[:4], "big")
+
+class Ring:
+    def __init__(self, vnodes=1):
+        self.vnodes = vnodes
+        self.points = []          <span class="c"># sorted list of (position, node)  &lt;- this IS the ring</span>
+
+    def add(self, node):
+        for i in range(self.vnodes):
+            bisect.insort(self.points, (h(f"{node}#{i}"), node))
+
+    def remove(self, node):
+        self.points = [p for p in self.points if p[1] != node]
+
+    def owner(self, key):
+        <span class="c"># first point clockwise of the key; wrap around to the start at the end of the ring</span>
+        i = bisect.bisect_right(self.points, (h(key), chr(255)))
+        return self.points[i % len(self.points)][1]
+
+keys = [f"user:{i}" for i in range(10_000)]
+
+def report(title, before, after):
+    moved = sum(before[k] != after[k] for k in keys)
+    print(f"{title:&lt;42} keys moved: {moved:&gt;5}  ({moved / len(keys):.0%})")
+
+<span class="c"># 1. plain modulo: hash(key) % N</span>
+mod3 = {k: f"S{h(k) % 3 + 1}" for k in keys}
+mod4 = {k: f"S{h(k) % 4 + 1}" for k in keys}
+report("modulo, 3 -&gt; 4 servers", mod3, mod4)
+
+<span class="c"># 2. the ring, first with one point per server, then with 150</span>
+for v in (1, 150):
+    ring = Ring(vnodes=v)
+    for n in ("S1", "S2", "S3"):
+        ring.add(n)
+    with3 = {k: ring.owner(k) for k in keys}
+    print(f"\nring with {v} point(s) per server, 3 servers -&gt; keys per server:",
+          dict(sorted(Counter(with3.values()).items())))
+    ring.add("S4")
+    with4 = {k: ring.owner(k) for k in keys}
+    report(f"ring ({v} vnodes), add S4", with3, with4)
+    ring.remove("S2")
+    without2 = {k: ring.owner(k) for k in keys}
+    report(f"ring ({v} vnodes), then remove S2", with4, without2)</code></pre>
+      </li>
+      <li>
+        <b>Run it</b>
+<pre><code>python3 ring.py</code></pre>
+<pre><code><span class="o">modulo, 3 -&gt; 4 servers                     keys moved:  7391  (74%)
+
+ring with 1 point(s) per server, 3 servers -&gt; keys per server: {'S1': 2781, 'S2': 5310, 'S3': 1909}
+ring (1 vnodes), add S4                    keys moved:   846  (8%)
+ring (1 vnodes), then remove S2            keys moved:  5310  (53%)
+
+ring with 150 point(s) per server, 3 servers -&gt; keys per server: {'S1': 3792, 'S2': 3045, 'S3': 3163}
+ring (150 vnodes), add S4                  keys moved:  2588  (26%)
+ring (150 vnodes), then remove S2          keys moved:  2357  (24%)</span></code></pre>
+      </li>
+      <li>
+        <b>Read the numbers</b>
+        <p>Modulo moved 74% of keys going from 3 to 4 servers, as the table in 7.2 predicted. The plain ring was lopsided (S2 held 53%) and adding S4 relieved only the small gap it landed in. With 150 points per server the split is within 10% of even, adding S4 moved 26% (ideal: 25%), and removing S2 moved exactly S2’s keys and spread them over the other three.</p>
+      </li>
+      <li>
+        <b>Notice what is faked</b>
+        <p>The script only computes <em>who owns what</em>. It moves no data. That is precisely the lesson’s point: consistent hashing is this function; the copying in section 5 is a separate job for your storage layer.</p>
+      </li>
+    </ol>
+
+    <div class="callout key">
+      <span class="cap">Try next</span>
+      <p>Give S1 twice the points of the others and check it gets about twice the keys (weighting). Add <code>owners(key, r=3)</code> that returns the next three <em>distinct</em> nodes clockwise (section 7.3). Then print, for the add-S4 case, which node each moved key came from: with one point per server it is always one node; with 150 it is all of them.</p>
+    </div>
+  </section>
+
+  <!-- 9 -->
+  <section id="interview" class="extra">
+    <div class="sec-head">
+      <span class="sec-num">9</span>
+      <div>
+        <h2>In the interview</h2>
+        <div class="sec-meta"><span class="badge">Extra depth · not in the video</span></div>
+      </div>
+    </div>
+    <div class="callout say">
+      <span class="cap">What to say when you split data across machines</span>
+      <p>“The data doesn’t fit on one node, so I’ll shard it by key. I won’t use hash mod N, because adding a node would remap almost every key and we’d have to move nearly all the data. Instead, consistent hashing: nodes and keys hash onto the same ring and a key belongs to the next node clockwise, so adding a node moves only about 1/N of the keys, all from one neighbour. I’d give each node 100–200 virtual points so the load is even, store each key on the next three distinct nodes for replication, and keep the ring in the client library with the member list in etcd. The ring only decides ownership; the actual copying happens by snapshotting the one affected node.”</p>
+    </div>
+
+    <div class="prose">
+      <h3>A worked design question</h3>
+      <p><strong>“Design a distributed cache (like Memcached) that holds 10 TB across many machines. How does a client find the right machine, and what happens when you add one?”</strong></p>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <span class="k">1 · Numbers</span>
+        <h3>How many nodes</h3>
+        <ul>
+          <li>10 TB at 64 GB of RAM per node → ~160 nodes, say 200 with headroom.</li>
+          <li>At 1 M requests/s, each node sees ~5,000/s. Fine for a cache.</li>
+          <li>Adding one node should move ~0.5% of keys (1/200), not 99.5%.</li>
+        </ul>
+      </div>
+      <div class="card teal">
+        <span class="k">2 · Routing</span>
+        <h3>Ring in the client</h3>
+        <ul>
+          <li>No proxy: the client library holds the sorted array (200 nodes × 150 points = 30,000 entries, tiny).</li>
+          <li>Lookup = one hash + one binary search, microseconds.</li>
+          <li>Member list in etcd; clients watch it and rebuild the array on change.</li>
+        </ul>
+      </div>
+      <div class="card amber">
+        <span class="k">3 · Adding a node</span>
+        <h3>For a cache, do nothing</h3>
+        <ul>
+          <li>A cache can afford misses: keys that moved are simply re-fetched from the database on first access.</li>
+          <li>So: add the node to etcd, clients re-route 0.5% of keys, 0.5% of requests miss once. No copying at all.</li>
+          <li>For a <em>database</em> you would do the snapshot-and-copy from section 5 instead.</li>
+        </ul>
+      </div>
+      <div class="card red">
+        <span class="k">4 · Trade-offs to name</span>
+        <h3>Say them before being asked</h3>
+        <ul>
+          <li>Hot keys still hit one node → split or front with a local cache.</li>
+          <li>Clients with a stale member list talk to the wrong node → version the ring, nodes answer “moved”.</li>
+          <li>Redis Cluster’s hash slots do the same job with a simpler slot table; both are acceptable answers.</li>
+        </ul>
+      </div>
+    </div>
+
+    <figure>
+      <p class="cap">The picture for the worked question</p>
+      <div class="svg-scroll">
+        <svg class="dia wide" viewBox="0 0 760 240" role="img" aria-label="API servers each embed a client library that holds the hash ring. The member list comes from etcd, where cache nodes register when they join or leave. A request hashes the key, binary-searches the ring and goes straight to the owning cache node. On a miss the API server reads the database and fills the cache.">
+          <path class="wire" d="M150 56V92" marker-end="url(#ah)"/>
+          <path class="wire teal dash" d="M525 30C525 6 300 6 236 32" marker-end="url(#ah-teal)"/>
+          <path class="wire accent" d="M260 118C360 118 380 50 450 50" marker-end="url(#ah-accent)"/>
+          <path class="wire dash" d="M260 126H450" marker-end="url(#ah)"/>
+          <path class="wire dash" d="M260 134C360 134 380 198 450 198" marker-end="url(#ah)"/>
+          <path class="wire" d="M260 164C400 232 600 232 690 146" marker-end="url(#ah)"/>
+          <text x="160" y="78" text-anchor="start" class="t-mono t-muted">watch</text>
+          <text x="340" y="48" text-anchor="middle" class="t-mono t-teal">nodes register on join / leave</text>
+          <text x="372" y="72" text-anchor="middle" class="t-mono t-accent">owner(key)</text>
+          <text x="470" y="230" text-anchor="middle" class="t-mono t-muted">on miss: read DB, then set in cache</text>
+
+          <rect class="node copy" x="70" y="16" width="160" height="40" rx="10"/>
+          <text x="150" y="41" text-anchor="middle" class="t-b">etcd · member list</text>
+          <rect class="node main" x="40" y="92" width="220" height="80" rx="10"/>
+          <text x="150" y="116" text-anchor="middle" class="t-b">API server × N</text>
+          <text x="150" y="136" text-anchor="middle" class="t-mono">client lib: sorted array</text>
+          <text x="150" y="154" text-anchor="middle" class="t-mono">hash → bisect → node</text>
+          <rect class="node" x="450" y="30" width="150" height="40" rx="10"/><text x="525" y="55" text-anchor="middle">cache node 1</text>
+          <rect class="node" x="450" y="106" width="150" height="40" rx="10"/><text x="525" y="131" text-anchor="middle">cache node 2</text>
+          <rect class="node ghost" x="450" y="178" width="150" height="40" rx="10"/><text x="525" y="203" text-anchor="middle" class="t-muted">… cache node 200</text>
+          <rect class="node" x="690" y="106" width="60" height="40" rx="10"/><text x="720" y="131" text-anchor="middle">DB</text>
+        </svg>
+      </div>
+    </figure>
+
+    <div class="prose"><p>Likely follow-ups. Answer each out loud before opening it.</p></div>
+
+    <details class="qa">
+      <summary>What problem does consistent hashing solve, in one sentence?</summary>
+      <div class="a">
+        <p>It decides which node owns a key in a way that changes the owner of as few keys as possible when nodes are added or removed: about 1/N of them instead of nearly all.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Why is hash mod N fine for API servers but not for a database?</summary>
+      <div class="a">
+        <p>API servers are stateless: any server can handle any request, so it does not matter that the mapping changed. A database node holds the data for its keys, so a changed mapping sends requests to nodes that do not have the data, and you must move it first.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>How much data moves when you add a node?</summary>
+      <div class="a">
+        <p>With the ring, about 1/(N+1) of the keys, which is the minimum possible, and all of them come from one neighbour (or, with virtual nodes, a little from each node). With modulo, about N/(N+1): going from 3 to 4 nodes moves 75% of keys, from 10 to 11 moves 91%.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Is consistent hashing a service?</summary>
+      <div class="a">
+        <p>No. It is a function plus a sorted array of node positions, living in the proxy or in a client library inside each API server. The only shared thing is the member list, which comes from gossip or a coordination service like etcd.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>What goes wrong with one point per node, and how do virtual nodes fix it?</summary>
+      <div class="a">
+        <p>Three random points make three random-sized gaps, so one node can own half the ring. Adding a node relieves only its one neighbour, and removing a node dumps all its keys on one neighbour.</p>
+        <p>Virtual nodes give each machine 100–200 points. The gaps average out, load is even within a few percent, a dead node’s keys spread over everyone, and a bigger machine can take more points.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>How do you replicate on the ring?</summary>
+      <div class="a">
+        <p>Store each key on the first R distinct physical nodes clockwise from it, typically R = 3. Dynamo calls that the preference list. With virtual nodes you skip points that belong to a machine already in the list.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Does consistent hashing solve hot keys?</summary>
+      <div class="a">
+        <p>No. It balances the number of keys, not the traffic per key. A viral key still lands on one node. Handle it with a cache in front, by splitting the key into several copies, or with a bounded-load variant that spills overflow to the next node.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>How do clients find out the ring changed?</summary>
+      <div class="a">
+        <p>Either the nodes gossip membership and clients ask any node, or the member list lives in a coordination service that clients watch. Version the ring so a node that receives a key it no longer owns can reply “moved” instead of serving stale data.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>What would you use instead, and when?</summary>
+      <div class="a">
+        <p>Redis Cluster’s fixed hash slots with a slot-to-node table, when you want the same benefit with a simpler model. Rendezvous hashing when there are only a few nodes and you want no data structure. Range partitioning when you need range scans, since hashing destroys order.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>Write the lookup on the whiteboard.</summary>
+      <div class="a">
+        <p>Keep a sorted array of (position, node). To look up a key: compute hash(key), binary-search for the first position greater than or equal to it, and if you run off the end, wrap to index 0. Adding a node is an insert into the sorted array; removing is a delete. That is the whole algorithm.</p>
+      </div>
+    </details>
+    <details class="qa">
+      <summary>What does consistent hashing not do?</summary>
+      <div class="a">
+        <p>It does not move data, does not replicate, does not detect failures and does not balance traffic. It only answers “who owns this key” in a stable way. Everything else is a separate part of the design.</p>
+      </div>
+    </details>
+  </section>
+
+  <nav class="lesson-nav" aria-label="Lessons">
+    <a href="23-bloom-filters.html"><span>← Lesson 23</span>Bloom Filters</a>
+    <a class="next" href="26-ecommerce-product-listing.html"><span>Lesson 26 →</span>Design: E-commerce Product Listing</a>
+  </nav>
+
+  <footer>
+    <p>Notes on lesson 24, “Consistent Hashing” (26 min 27 s). Blue sections follow the video. Amber sections add depth beyond it. The lab script needs only Python 3.</p>
+  </footer>
+
+</div>
+
+<script>
+  (function(){
+    var themeBtn = document.getElementById("themeBtn");
+    if (themeBtn) themeBtn.addEventListener("click", function(){
+      var root = document.documentElement;
+      var isDark = root.getAttribute("data-theme") === "dark"
+        || (!root.getAttribute("data-theme") && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+      root.setAttribute("data-theme", isDark ? "light" : "dark");
+    });
+  })();
+</script>
+<script src="../js/vendor/rough.js"></script>
+<script src="../js/sketch.js"></script>
+</body>
+</html>

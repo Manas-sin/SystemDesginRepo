@@ -1,7 +1,8 @@
 """Builds every diagrams/*.excalidraw file from the sketch definitions below,
 then embeds them into the pages (see embed_sketches.py).
 
-    python3 tools/make_sketches.py
+    python3 tools/make_sketches.py                 # all of them
+    python3 tools/make_sketches.py 23-bloom-filters  # just one
 
 Each sketch is plain data: boxes, text, arrows, badges and sticky notes.
 The output opens in excalidraw.com (menu → Open) and is drawn on the site
@@ -26,10 +27,11 @@ class Sketch:
         self.items.append(dict(t="text", x=0, y=0, lines=[title], size=28, align="left", color=INK, g=None))
         self.items.append(dict(t="text", x=0, y=42, lines=[subtitle], size=16, align="left", color=GRAY, g=None))
 
-    def box(self, name, x, y, w, h, fill, lines, dashed=False, size=15):
+    def box(self, name, x, y, w, h, fill, lines, dashed=False, size=15, align="center"):
         self.items.append(dict(t="rect", x=x, y=self.Y + y, w=w, h=h, fill=fill, dashed=dashed, g=name))
         th = len(lines) * size * 1.25
-        self.items.append(dict(t="text", x=x + w / 2, y=self.Y + y + (h - th) / 2, lines=lines, size=size, align="center", color=INK, g=name))
+        tx = x + w / 2 if align == "center" else x + 14
+        self.items.append(dict(t="text", x=tx, y=self.Y + y + (h - th) / 2, lines=lines, size=size, align=align, color=INK, g=name))
 
     def text(self, x, y, lines, size=13, align="left", color=GRAY):
         if isinstance(lines, str):
@@ -317,6 +319,179 @@ def lesson22():
     return s
 
 
+# ----------------------------------------------------------------- lesson 23
+def lesson23():
+    s = Sketch("Lesson 23 · Bloom filters",
+               "A tiny bit array that answers “definitely NOT here” or “probably here”. Put it in front of anything expensive. Follow the numbers.")
+    # ---- part A: how it works
+    s.text(20, -22, "A · How it works: k hash functions set k bits", size=15, color=INK)
+    s.box("in1", 0, 10, 170, 44, BLUE, ["add(“alice”)"])
+    s.box("in2", 0, 90, 170, 44, BLUE, ["add(“bob”)"])
+    s.box("q", 0, 230, 170, 44, GREEN, ["check(“carol”)"])
+    s.box("h1", 250, 20, 110, 36, LIGHT, ["hash 1"])
+    s.box("h2", 250, 70, 110, 36, LIGHT, ["hash 2"])
+    s.box("h3", 250, 120, 110, 36, LIGHT, ["hash 3"])
+    bits = [0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0]
+    BX = 440
+    for i, b in enumerate(bits):
+        x = BX + i * 24
+        s.items.append(dict(t="rect", x=x, y=s.Y + 60, w=24, h=28, fill=ORANGE if b else "#ffffff", dashed=False, g="bits"))
+        s.items.append(dict(t="text", x=x + 12, y=s.Y + 66, lines=[str(b)], size=14, align="center", color=INK, g="bits"))
+        s.items.append(dict(t="text", x=x + 12, y=s.Y + 92, lines=[str(i)], size=11, align="center", color=GRAY, g="bits"))
+    s.text(584, 6, "alice → bits 1, 6, 10  ·  bob → bits 3, 8, 10  (bit 10 is shared — that is fine)", align="center", color=BLUE_TXT)
+    s.text(584, 30, "bit array · m = 12 bits · all start at 0", align="center")
+    for y0 in (38, 88, 138):
+        s.arrow([[170, 32], [250, y0]])
+    for y0 in (48, 98, 148):
+        s.arrow([[170, 112], [250, y0]], dashed=True)
+    s.arrow([[360, 38], [BX + 1 * 24 + 12, 60]], color=BLUE_TXT)
+    s.arrow([[360, 88], [BX + 6 * 24 + 12, 60]], color=BLUE_TXT)
+    s.arrow([[360, 138], [BX + 10 * 24 + 12, 60]], color=BLUE_TXT)
+    s.arrow([[170, 252], [250, 252], [250, 170]], color=TEAL_TXT, label="same 3 hashes", lx=280, ly=232, anchor="start")
+    s.arrow([[360, 170], [BX + 2 * 24 + 12, 104]], dashed=True, color=RED_TXT)
+    s.arrow([[360, 170], [BX + 6 * 24 + 12, 104]], dashed=True, color=TEAL_TXT)
+    s.arrow([[360, 170], [BX + 9 * 24 + 12, 104]], dashed=True, color=RED_TXT)
+    s.text(0, 300, ["carol → bits 2, 6, 9.   Bit 2 is 0 → “definitely NOT in the set”. Answer at once; no lookup needed.",
+                    "If all k bits had been 1 → “probably in the set” (could be a false positive) → do the real lookup."], size=13, color=INK)
+    s.text(0, 352, "Rules:  never a false “no”  ·  sometimes a false “yes”  ·  cannot delete  ·  cannot list members  ·  cannot resize", size=13, color=RED_TXT)
+    # ---- part B: where it sits
+    s.text(760, -22, "B · Where it sits in a system", size=15, color=INK)
+    s.box("client", 760, 40, 120, 56, BLUE, ["Client"])
+    s.box("api", 940, 40, 150, 56, BLUE, ["API server"])
+    s.box("redis", 1210, 40, 150, 56, VIOLET, ["Redis (shared)", "BF.ADD / BF.EXISTS"], size=13)
+    s.box("bf", 940, 160, 150, 70, ORANGE, ["Bloom filter", "(in RAM, a few MB)"], size=14)
+    s.box("db", 1210, 160, 150, 70, GREEN, ["Database / disk", "(slow, expensive)"], size=14)
+    s.arrow([[880, 68], [940, 68]], label="is “x” taken?", lx=910, ly=18)
+    s.arrow([[1015, 96], [1015, 160]], label="① ask the filter", lx=1027, ly=118, anchor="start")
+    s.arrow([[1090, 60], [1210, 60]], dashed=True, label="or a shared filter", lx=1150, ly=40)
+    s.arrow([[1090, 195], [1210, 195]], label="② only if “maybe”", lx=1150, ly=174)
+    s.arrow([[1210, 215], [1090, 215]], dashed=True, label="the truth", lx=1150, ly=222)
+    s.text(1015, 252, "“NO” → answer now (most requests)", color=TEAL_TXT, align="center")
+    s.text(1285, 252, "“maybe” → real check (rare)", color=RED_TXT, align="center")
+    s.text(760, 300, ["Where you will meet it:",
+                      "• DB engines (Cassandra, HBase, RocksDB): skip disk files that cannot hold the key",
+                      "• CDN / cache: cache only on the 2nd request (“one-hit wonders” never enter)",
+                      "• “username taken?”, spell check, browser unsafe-site list, de-dup in web crawlers"], size=13, color=INK)
+    for cx, cy, n in [(166, 6, 1), (356, 16, 2), (736, 56, 3), (166, 226, 4), (1086, 156, 5), (1356, 156, 6)]:
+        s.badge(cx, cy, n)
+    s.notes(410, [
+        ("① Add an item", "Run it through k hash functions (here 3). Each gives a position in the bit array. Set those k bits to 1. The item itself is NOT stored."),
+        ("② Hash functions", "Fast, non-cryptographic: MurmurHash, xxHash. Trick: compute two hashes h1, h2 and get k of them as h1 + i·h2."),
+        ("③ The bit array", "m bits, all zero at start. ~10 bits per item ≈ 1% false positives. 100M items ≈ 120 MB — fits in RAM."),
+        ("④ Check an item", "Hash it the same way. Any bit still 0 → definitely absent. All k bits 1 → probably present (a collision is possible)."),
+        ("⑤ Put it in front", "A cheap memory check before the expensive disk / network / DB lookup. Every true “no” is answered without the lookup."),
+        ("⑥ The trade", "You give up: exactness, delete, listing, resizing. You get: tiny memory, O(k) time, and never a false “no”."),
+    ])
+    return s
+
+
+# ----------------------------------------------------------------- lesson 24
+def lesson24():
+    s = Sketch("Lesson 24 · Consistent hashing",
+               "Put servers AND keys on the same ring. A key belongs to the first server clockwise. Add or remove a server → only its neighbour’s keys move.")
+    import math
+    cx, cy, R = 300, 230, 170
+    s.text(20, -22, "A · The ring", size=15, color=INK)
+    s.items.append(dict(t="ellipse", x=cx - R, y=s.Y + cy - R, w=2 * R, h=2 * R))
+    s.text(cx, cy - 12, ["hash ring", "0 … 2³²−1"], align="center", size=14)
+    s.text(cx, cy - R - 40, "0 / 2³²", align="center")
+
+    def pt(deg, r=R):
+        a = math.radians(deg - 90)
+        return cx + r * math.cos(a), cy + r * math.sin(a)
+
+    for name, deg, col in [("S1", 30, BLUE), ("S2", 150, GREEN), ("S3", 260, VIOLET)]:
+        x, y = pt(deg)
+        s.items.append(dict(t="rect", x=x - 30, y=s.Y + y - 20, w=60, h=40, fill=col, dashed=False, g=name))
+        s.items.append(dict(t="text", x=x, y=s.Y + y - 10, lines=[name], size=15, align="center", color=INK, g=name))
+    x4, y4 = pt(330)
+    s.items.append(dict(t="rect", x=x4 - 30, y=s.Y + y4 - 20, w=60, h=40, fill=ORANGE, dashed=True, g="S4"))
+    s.items.append(dict(t="text", x=x4, y=s.Y + y4 - 10, lines=["S4 new"], size=14, align="center", color=INK, g="S4"))
+    for name, deg in [("k1", 5), ("k2", 60), ("k3", 100), ("k4", 130), ("k5", 190), ("k6", 230), ("k7", 290), ("k8", 310)]:
+        x, y = pt(deg, R - 32)
+        s.items.append(dict(t="ellipse", x=x - 9, y=s.Y + y - 9, w=18, h=18, fill=YELLOW))
+        lx, ly = pt(deg, R - 62)
+        s.items.append(dict(t="text", x=lx, y=s.Y + ly - 7, lines=[name], size=12, align="center", color=GRAY, g=None))
+    s.text(cx, cy + R + 24, "walk clockwise from a key → the first server you meet owns it", align="center", color=BLUE_TXT)
+    s.text(cx, cy + R + 44, "k1 → S1  ·  k2 k3 k4 → S2  ·  k5 k6 → S3  ·  k7 k8 → S1 (wrap around)", align="center", color=INK)
+    s.text(cx + R + 14, cy - R + 60, ["add S4 at 330°:", "only k7, k8 move (S1 → S4)", "k1 – k6 do not move at all"], color=TEAL_TXT)
+    s.text(cx + R + 14, cy + 40, ["remove S2:", "k2 k3 k4 go to S3", "nobody else notices"], color=RED_TXT)
+    # ---- part B: modulo vs ring
+    s.text(650, -22, "B · Why not  server = hash(key) % N ?", size=15, color=INK)
+    s.box("mod", 650, 10, 320, 90, RED, ["server = hash(key) % N", "N: 3 → 4  ⇒  ~75% of keys change server", "cache: a storm of misses · DB: mass data move"], size=14)
+    s.box("ring", 650, 130, 320, 90, GREEN, ["ring: server = next one clockwise", "N: 3 → 4  ⇒  only ~1/4 of keys move", "and only ONE neighbour gives up keys"], size=14)
+    s.arrow([[810, 100], [810, 130]], label="the fix", lx=822, ly=106, anchor="start")
+    # ---- part C: virtual nodes
+    s.text(650, 250, "C · Virtual nodes (vnodes)", size=15, color=INK)
+    s.box("vn", 650, 280, 320, 110, LIGHT, ["each real server = 100–200 points on the ring", "S1-a, S1-b, S1-c … spread all around",
+                                             "→ even load; a bigger machine gets more points", "→ when S1 dies its keys spread over ALL the rest"], size=13, align="left")
+    # ---- part D: who uses it
+    s.text(1000, -22, "D · Who uses the ring", size=15, color=INK)
+    s.box("users", 1000, 10, 330, 210, YELLOW, ["DynamoDB · Cassandra · Riak", "   → which node stores this row", "Memcached / Redis client libraries",
+                                                "   → which cache node holds this key", "Load balancers (same user → same server)", "CDNs (Akamai) · Discord · Chord DHT"], size=13, align="left")
+    s.box("api", 1000, 280, 130, 60, BLUE, ["API server"])
+    s.box("rl", 1200, 280, 130, 60, ORANGE, ["ring lookup", "(sorted array +", "binary search)"], size=12)
+    s.arrow([[1130, 310], [1200, 310]], label="hash(key)", lx=1165, ly=290)
+    s.text(1165, 352, "O(log V) per lookup · V = number of vnodes", align="center")
+    for bx, by, n in [(cx - 60, cy - R - 32, 1), (966, 6, 2), (966, 126, 3), (966, 276, 4), (1326, 6, 5), (1326, 276, 6)]:
+        s.badge(bx, by, n)
+    s.notes(490, [
+        ("① The ring", "Hash the server name AND the key with the same function onto 0 … 2³²−1, bent into a circle. Nothing is stored on the ring — it is just arithmetic."),
+        ("② Modulo breaks", "hash % N depends on N. Change N and almost every key maps somewhere else → every cache misses at once, or terabytes move between DB shards."),
+        ("③ Only neighbours move", "A new server takes keys only from the server just clockwise of it. Removing one hands its keys to its clockwise neighbour. Everyone else: untouched."),
+        ("④ Virtual nodes", "3 real servers = 3 points → uneven gaps, uneven load. 150 points each → statistically even. A bigger machine simply takes more points."),
+        ("⑤ Replication", "Store each key on the next R distinct servers clockwise (R = 3). Cassandra and Dynamo do exactly this. Skip vnodes of the same machine."),
+        ("⑥ Hot keys", "The ring balances KEYS, not TRAFFIC. One celebrity key still lands on one server. Fix: cache it, or split it (key#1, key#2 …) across servers."),
+    ])
+    return s
+
+
+# ----------------------------------------------------------------- lesson 26
+def lesson26():
+    s = Sketch("Lesson 26 · E-commerce product listing (one shop, 100 items)",
+               "Day-zero design: three tiers, two front ends, one backend, reads scaled with replicas instead of a cache. Follow the numbers.")
+    s.text(20, -22, "A · The architecture", size=15, color=INK)
+    s.box("cust", 0, 50, 150, 90, BLUE, ["Customers", "(their browsers)", "100s of thousands"], size=14)
+    s.box("fe", 230, 40, 210, 110, BLUE, ["Catalog frontend", "⚖ LB → ▭ ▭ ▭ servers", "autoscale on requests"], size=14)
+    s.box("owner", 0, 270, 150, 90, ORANGE, ["Shop owner", "(their browser)", "one person"], size=14)
+    s.box("admin", 230, 260, 210, 110, ORANGE, ["Admin UI", "⚖ LB → ▭ server (+1 spare)", "add · update · delete"], size=14)
+    s.box("be", 520, 150, 210, 110, BLUE, ["Catalog backend", "⚖ LB → ▭ ▭ ▭ servers", "checks admin role on writes"], size=14)
+    s.box("main", 830, 50, 200, 90, GREEN, ["Catalog DB (main)", "reads + writes", "100 items ≈ 100 KB"], size=14)
+    s.box("rep1", 830, 190, 200, 80, GREEN, ["Read replica 1", "reads only"], dashed=True, size=14)
+    s.box("rep2", 830, 310, 200, 80, GREEN, ["Read replica 2", "reads only"], dashed=True, size=14)
+    s.text(930, 434, "need more reads? add replica 3 …", align="center", color=TEAL_TXT)
+    s.arrow([[150, 95], [230, 95]], label="HTTPS · pages", lx=190, ly=72)
+    s.arrow([[440, 95], [520, 185]], label="GET /products", lx=470, ly=118, anchor="start")
+    s.arrow([[150, 315], [230, 315]])
+    s.arrow([[440, 315], [480, 315], [480, 240], [520, 240]], label="POST / PUT / DELETE  (admin token)", lx=445, ly=322, anchor="start")
+    s.arrow([[730, 180], [780, 180], [780, 95], [830, 95]], label="writes + some reads", lx=772, ly=110, anchor="end")
+    s.arrow([[730, 205], [830, 230]], label="reads, random pick", lx=826, ly=248, anchor="end")
+    s.arrow([[730, 230], [830, 345]])
+    s.arrow([[930, 140], [930, 190]], dashed=True, label="replicate", lx=942, ly=158, anchor="start")
+    s.arrow([[930, 270], [930, 310]], dashed=True, label="replicate", lx=942, ly=282, anchor="start")
+    s.text(520, 345, ["each API server opens 2 connections: main + replica,", "and picks one at random for every read"], color=BLUE_TXT)
+    s.text(520, 392, ["no cache → nothing to invalidate:", "an admin write lands on main and is copied to every replica"], color=TEAL_TXT)
+    s.text(0, 400, ["LOAD PER BOX:  frontend huge → scale out  ·  backend high → scale out",
+                    "admin UI: one user → 1 server (+ spare)  ·  DB: read-heavy → replicas"], size=13, color=INK)
+    # ---- part B: replicas vs cache
+    s.text(1080, -22, "B · Scale reads: replica or cache?", size=15, color=INK)
+    s.box("cache", 1080, 10, 260, 120, RED, ["Cache (Redis) — not chosen", "+ µs reads, takes load off the DB", "− every admin write must delete", "   the stale key; can serve old data"], size=13, align="left")
+    s.box("rep", 1080, 160, 260, 120, GREEN, ["Read replicas — chosen", "+ nothing to invalidate: replication", "   carries every write to every copy", "− each replica is a DB server; ms reads"], size=13, align="left")
+    s.text(1080, 300, ["Both are valid. Picked replicas because", "writes are rare and tiny (one owner,", "100 items). Just because a cache", "exists does not mean you add it."], size=13, color=INK)
+    s.text(1080, 380, ["Watch out: replication is async, so an", "owner may read an old row for a moment", "→ send the admin’s reads to main."], size=13, color=RED_TXT)
+    for cx, cy, n in [(436, 36, 1), (726, 146, 2), (1026, 46, 3), (436, 256, 4), (1026, 186, 5), (1336, 6, 6)]:
+        s.badge(cx, cy, n)
+    s.notes(470, [
+        ("① Estimate, then pick", "100 items × 1 KB = 100 KB: fits any single node. Structured rows (title, price, colour) → a relational DB. Never fancier than the data needs."),
+        ("② A box = LB + servers", "Any box with N stateless servers has a load balancer in front and autoscaling behind. Drawing it as one box keeps the picture clean."),
+        ("③ Three tiers", "Browser → compute → storage. The browser is the Customers box; the frontend box is servers that send it pages. Only the DB holds state, so only the DB needs copies."),
+        ("④ Separate admin UI", "Same backend, different frontend. Admin code stays out of the public bundle and bugs stay apart. Backend checks the role on every write."),
+        ("⑤ Read-heavy → replicas", "Customers only read. Add replicas; each API server opens two connections and picks one per read. Main serves reads too — that is not a rule."),
+        ("⑥ Replica vs cache", "Both scale reads. Replica: no invalidation, slower, costs a DB server. Cache: faster and cheaper per read, but you must delete keys on every write."),
+    ])
+    return s
+
+
 # ---------------------------------------------------------- excalidraw output
 def nonce():
     return random.randint(1, 2 ** 31 - 1)
@@ -370,6 +545,9 @@ def to_excalidraw(items):
                 lb = it["label"]
                 out.append(ex_text(lb["x"], lb["y"], [lb["text"]], 13,
                                    {"middle": "center", "start": "left", "end": "right"}[lb["anchor"]], GRAY, None))
+        elif it["t"] == "ellipse":
+            out.append(el("ellipse", it["x"], it["y"], it["w"], it["h"], backgroundColor=it.get("fill", "transparent"),
+                          groupIds=[it["g"]] if it.get("g") else []))
         elif it["t"] == "badge":
             g = f"badge{nonce():x}"
             out.append(el("ellipse", it["x"] - 13, it["y"] - 13, 26, 26, backgroundColor=RED, groupIds=[g]))
@@ -384,11 +562,17 @@ SKETCHES = {
     "20-leader-election": lesson20,
     "21-client-server-protocols": lesson21,
     "22-blob-storage-s3": lesson22,
+    "23-bloom-filters": lesson23,
+    "24-consistent-hashing": lesson24,
+    "26-ecommerce-product-listing": lesson26,
 }
 
 if __name__ == "__main__":
     os.makedirs(OUT, exist_ok=True)
+    only = sys.argv[1:]  # optional: build just these names, e.g. `make_sketches.py 23-bloom-filters`
     for name, build in SKETCHES.items():
+        if only and name not in only:
+            continue
         doc = {"type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
                "elements": to_excalidraw(build().items),
                "appState": {"gridSize": None, "viewBackgroundColor": "#ffffff"}, "files": {}}
